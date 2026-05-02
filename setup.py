@@ -16,7 +16,7 @@ ENV_TEMPLATES = {
     "uv": {
         "create": "uv venv --seed --python {ver} \"{dir}\"",
         "run": _PY_PATH,
-        "install": "uv pip install --python \"{dir}\""
+        "install": "uv pip install --index-strategy unsafe-best-match --python \"{dir}\""
     },
     "venv": {
         "create": "\"{sys_py}\" -m venv \"{dir}\"",
@@ -261,20 +261,20 @@ def get_env_details(name, env_data):
 
 def show_status():
     manager = EnvsManager()
-    print("\n" + "="*95)
-    print(f"{'INSTALLED ENVIRONMENTS & VERSIONS':^95}")
-    print("="*95)
+    print("\n" + "="*90)
+    print(f"{'INSTALLED ENVIRONMENTS & VERSIONS':^90}")
+    print("="*90)
     
     envs = manager.list_envs()
     active = manager.get_active()
     
     if not envs:
         print("   No environments installed.")
-        print("="*95)
+        print("="*90)
         return
 
-    print(f"{'NAME':<15} | {'TYPE':<6} | {'PYTHON':<8} | {'TORCH':<15} | {'TRITON':<10} | {'SAGE':<12} | {'FLASH':<12}")
-    print("-" * 95)
+    print(f"{'NAME':<15} | {'TYPE':<5} | {'PYTHON':<8} | {'TORCH':<15} | {'TRITON':<9} | {'SAGE':<10} | {'FLASH':<10}")
+    print("-" * 90)
 
     for name, data in envs.items():
         details = get_env_details(name, data)
@@ -282,19 +282,19 @@ def show_status():
         display_name = f"[{marker}] {name}"
         
         if 'error' in details:
-            print(f"{display_name:<15} | {data['type']:<6} | [Error reading environment]")
+            print(f"{display_name:<15} | {data['type']:<5} | [Error reading environment]")
             continue
             
-        print(f"{display_name:<15} | {data['type']:<6} | "
+        print(f"{display_name:<15} | {data['type']:<5} | "
               f"{details.get('python','?'):<8} | "
               f"{details.get('torch','?'):<15} | "
-              f"{details.get('triton','?'):<10} | "
-              f"{details.get('sageattention','?'):<12} | "
-              f"{details.get('flash_attn','?'):<12}")
+              f"{details.get('triton','?'):<9} | "
+              f"{details.get('sageattention','?'):<10} | "
+              f"{details.get('flash_attn','?'):<10}")
     
-    print("-" * 95)
+    print("-" * 90)
     print(f" * = Active Environment")
-    print("="*95 + "\n")
+    print("="*90 + "\n")
 
 def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k, flash_k, kernel_list, config):
     template = ENV_TEMPLATES[env_type]
@@ -450,9 +450,9 @@ def do_manage():
     manager = EnvsManager()
     while True:
         os.system('cls' if IS_WIN else 'clear')
-        print("======================================================")
-        print("               ENVIRONMENT MANAGER")
-        print("======================================================")
+        print("==========================================================================================")
+        print(f"{'ENVIRONMENT MANAGER':^90}")
+        print("==========================================================================================")
         envs = manager.list_envs()
         active = manager.get_active()
         
@@ -463,7 +463,7 @@ def do_manage():
                 status = "(Active)" if name == active else ""
                 print(f" - {name:<15} [{data['type']}] {status}")
         
-        print("------------------------------------------------------")
+        print("------------------------------------------------------------------------------------------")
         print("1. Set Active Environment")
         print("2. Delete Environment")
         print("3. Add Existing Environment")
@@ -508,9 +508,9 @@ def do_manage():
 
 def do_upgrade(config):
     manager = EnvsManager()
-    print("\n" + "="*60)
-    print("      WAN2GP MANUAL COMPONENT UPGRADE")
-    print("="*60)
+    print("\n" + "="*90)
+    print(f"{'WAN2GP MANUAL COMPONENT UPGRADE':^90}")
+    print("="*90)
     
     env_name = manager.resolve_target_env()
     env_data = manager.list_envs()[env_name]
