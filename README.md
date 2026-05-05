@@ -231,7 +231,7 @@ Use this script to get the latest updates for WAN2GP and upgrade dependencies.
 * **1. Update:** Fetches the latest code from GitHub and updates requirements.
 * **2. Upgrade:** Allows you to manually individually upgrade heavy backend components (like PyTorch, Triton, Sage Attention).
 
-#### 4️⃣ Managing Environments (`scripts\manage.bat` | `/manage.sh`)
+#### 4️⃣ Managing Environments (`scripts\manage.bat` | `scripts/manage.sh`)
 Use this script to manage and switch between your sandboxed environments safely.
 
 * **Example Scenario 1: Migrating an Existing Setup**

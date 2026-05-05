@@ -446,6 +446,61 @@ def do_install_auto(env_type, config, detected_key):
     manager.set_active(name)
     print(f"\n[*] Automatic Install Complete! '{name}' is now active.")
 
+def open_terminal():
+    manager = EnvsManager()
+    env_name = manager.get_active()
+    
+    if not env_name:
+        print("[!] No active environment. Please select or install one first.")
+        input("Press Enter...")
+        return
+    
+    env_data = manager.list_envs().get(env_name)
+    if not env_data:
+        print(f"[!] Could not find environment data for '{env_name}'.")
+        return
+        
+    e_type = env_data["type"]
+    e_path = env_data["path"]
+    
+    print(f"\n[*] Spawning interactive terminal for '{env_name}'...")
+    print(f"[*] (Type 'exit' when you are done to return to the menu)\n")
+    
+    if IS_WIN:
+        if e_type in ["venv", "uv"]:
+            act_bat = os.path.join(e_path, 'Scripts', 'activate.bat')
+            subprocess.run(f'cmd.exe /K "{act_bat}"')
+        elif e_type == "conda":
+            conda_bat = "conda.bat"
+            if not shutil.which("conda"):
+                user = os.environ.get("USERPROFILE", "")
+                paths = [
+                    os.path.join(user, "Miniconda3", "condabin", "conda.bat"),
+                    os.path.join(user, "Anaconda3", "condabin", "conda.bat"),
+                    r"C:\ProgramData\Miniconda3\condabin\conda.bat"
+                ]
+                for p in paths:
+                    if os.path.exists(p):
+                        conda_bat = p
+                        break
+            subprocess.run(f'cmd.exe /K "{conda_bat}" activate "{e_path}"')
+        else:
+            subprocess.run('cmd.exe /K')
+    else:
+        rc_cmd = "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi\n"
+        if e_type in ["venv", "uv"]:
+            rc_cmd += f"source '{os.path.join(e_path, 'bin', 'activate')}'\n"
+        elif e_type == "conda":
+            rc_cmd += (
+                "if command -v conda >/dev/null 2>&1; then eval \"$(conda shell.bash hook)\"; "
+                "else for base in \"$HOME/miniconda3\" \"$HOME/anaconda3\" \"/opt/miniconda3\" \"/opt/anaconda3\"; do "
+                "if [ -f \"$base/etc/profile.d/conda.sh\" ]; then source \"$base/etc/profile.d/conda.sh\"; break; fi; done; fi\n"
+                f"conda activate '{e_path}'\n"
+            )
+
+        linux_shell_cmd = f"bash --rcfile <(cat << 'EOF_WAN2GP'\n{rc_cmd}EOF_WAN2GP\n)"
+        subprocess.run(linux_shell_cmd, shell=True, executable='/bin/bash')
+
 def do_manage():
     manager = EnvsManager()
     while True:
@@ -468,7 +523,8 @@ def do_manage():
         print("2. Delete Environment")
         print("3. Add Existing Environment")
         print("4. List Environment Details")
-        print("5. Return to Menu / Exit")
+        print("5. Open Terminal in Active Environment")
+        print("6. Exit")
         
         choice = input("\nSelect option: ")
         
@@ -504,6 +560,8 @@ def do_manage():
             show_status()
             input("Press Enter...")
         elif choice == "5":
+            open_terminal()
+        elif choice == "6":
             break
 
 def do_upgrade(config):
