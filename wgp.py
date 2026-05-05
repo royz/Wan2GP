@@ -1,14 +1,14 @@
 ############# WanGP Copyright DeepBeepMeep 2025-2026 #############
 import os, sys
 os.environ["GRADIO_LANG"] = "en"
+p = os.path.dirname(os.path.abspath(__file__))
+if p not in sys.path:
+    sys.path.insert(0, p)
 from shared.default_device import set_default_cuda_device_from_arg; set_default_cuda_device_from_arg("gpu")
 # # os.environ.pop("TORCH_LOGS", None)  # make sure no env var is suppressing/overriding
 # os.environ["TORCH_LOGS"]= "recompiles"
 import torch._logging as tlog
-# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)    
-p = os.path.dirname(os.path.abspath(__file__))
-if p not in sys.path:
-    sys.path.insert(0, p)
+# tlog.set_logs(recompiles=True, guards=True, graph_breaks=True)
 # from shared.utils.crash_diagnostics import install_wgp_crash_diagnostics; install_wgp_crash_diagnostics(__file__)
 # Ensure plugin-side `import wgp` resolves to this live module instance.
 if sys.modules.get("wgp") is not sys.modules.get(__name__):
@@ -6188,6 +6188,7 @@ def generate_video(
     original_prompts = prompts.copy()
     gen["sliding_window"] = sliding_window 
     while not abort: 
+        stop_current_sample = False
         extra_generation += gen.get("extra_orders",0)
         gen["extra_orders"] = 0
         total_generation = repeat_generation + extra_generation
@@ -6207,7 +6208,7 @@ def generate_video(
         context_scale = None
         window_no = 0
         extra_windows = 0
-        abort_scheduled = False
+        stop_sample_scheduled = False
         guide_start_frame = 0 # pos of of first control video frame of current window  (reuse_frames later than the first processed frame)
         keep_frames_parsed = [] # aligned to the first control frame of current window (therefore ignore previous reuse_frames)
         pre_video_guide = None # reuse_frames of previous window
@@ -6241,7 +6242,7 @@ def generate_video(
                 abort = gen.get("abort", False)
 
  
-        while not abort:
+        while not abort and not stop_current_sample:
             enable_RIFLEx = RIFLEx_setting == 0 and current_video_length > (6* get_model_fps(base_model_type)+1) or RIFLEx_setting == 1
             prompt =  prompts[window_no] if window_no < len(prompts) else prompts[-1]
             new_extra_windows = gen.get("extra_windows",0)
@@ -6530,7 +6531,7 @@ def generate_video(
                         break
                     elif src_video.shape[1] < current_video_length:
                         current_video_length = src_video.shape[1]
-                        abort_scheduled = True 
+                        stop_sample_scheduled = True 
                 if src_faces is not None:
                     if src_faces.shape[1] < src_video.shape[1]:
                         src_faces = torch.concat( [src_faces,  src_faces[:, -1:].repeat(1, src_video.shape[1] - src_faces.shape[1], 1,1)], dim =1)
@@ -6809,7 +6810,7 @@ def generate_video(
                 send_cmd("output")  
             else:
                 sample = samples.cpu()
-                abort = abort_scheduled or not (is_image or audio_only) and sample.shape[1] < current_video_length    
+                stop_current_sample = stop_sample_scheduled or (not (is_image or audio_only) and sample.shape[1] < current_video_length)
                 # if True: # for testing
                 #     torch.save(sample, "output.pt")
                 # else:
