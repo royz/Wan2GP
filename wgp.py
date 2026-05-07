@@ -1331,10 +1331,14 @@ def save_queue_action(state):
         zip_buffer.close()
 
 def clean_settings(model_type, params):
-    # Use primary_settings as base (not model-specific saved settings)
-    # This ensures loaded queues/settings behave predictably
+    # Use primary_settings plus model-specific defaults as base (not model-specific saved settings).
+    # This ensures loaded queues/settings behave predictably while preserving handler defaults.
     saved_settings_version = params.get('settings_version', 0)
     merged = primary_settings.copy()
+    model_def = get_model_def(model_type)
+    base_model_type = get_base_model_type(model_type)
+    model_handler = get_model_handler(model_type)
+    model_handler.update_default_settings(base_model_type, model_def, merged)
     merged.update(params)
     params.clear()
     params.update(merged)
