@@ -707,6 +707,7 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
     model_def = get_model_def(model_type)
     model_handler = get_model_handler(model_type)
     image_outputs = inputs["image_mode"] > 0
+    is_edit_mode = str(inputs.get("mode", "") or "").startswith("edit_")
     any_steps_skipping = model_def.get("tea_cache", False) or model_def.get("mag_cache", False)
     model_type = get_base_model_type(model_type)
 
@@ -823,6 +824,11 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
     if "vae" in spatial_upsampling:
         if image_mode not in model_def.get("vae_upsampler", []):
             return err(f"VAE Spatial Upsampling is not available for {medium}")
+    edit_upsampler = find_edit_spatial_upsampler(spatial_upsampling)
+    if edit_upsampler is not None:
+        edit_upsampling_error = edit_upsampler.validate_upsampling(spatial_upsampling, image_mode)
+        if edit_upsampling_error:
+            return err(edit_upsampling_error)
 
     if len(activated_loras) > 0:
         activated_loras = update_loras_url_cache(get_lora_dir(model_type), activated_loras)
@@ -896,11 +902,12 @@ def validate_settings(state, model_type, single_prompt, inputs, silent=False):
     else:
         custom_guide = None
 
-    if "V" in image_prompt_type:
-        if video_source == None:
-            return err("You must provide a Source Video file to continue")
-    else:
-        video_source = None
+    if not is_edit_mode:
+        if "V" in image_prompt_type:
+            if video_source == None:
+                return err("You must provide a Source Video file to continue")
+        else:
+            video_source = None
 
     if not input_video_strength_visible(model_def, image_prompt_type, video_prompt_type):
         input_video_strength = 1.0
@@ -1339,7 +1346,7 @@ def clean_settings(model_type, params):
     base_model_type = get_base_model_type(model_type)
     model_handler = get_model_handler(model_type)
     model_handler.update_default_settings(base_model_type, model_def, merged)
-    merged.update(params)
+    merged.update({k: v for k, v in params.items() if v is not None or k not in merged})
     params.clear()
     params.update(merged)
     fix_settings(model_type, params, saved_settings_version)
@@ -1450,9 +1457,17 @@ def _build_runtime_task(task_id_val, params, plugin_data=None):
     }
 
 
+def _is_edit_task_params(params):
+    return isinstance(params, dict) and str(params.get("mode", "") or "").startswith("edit_")
+
+
 def _extract_model_type(params, state, log_prefix="[load]"):
     base_model_type = params.get('base_model_type', None)
     model_type = original_model_type = params.get('model_type', base_model_type)
+
+    if _is_edit_task_params(params):
+        params["model_type"] = "" if model_type is None else model_type
+        return params["model_type"], None
 
     if model_type is not None and get_model_def(model_type) is None:
         model_type = base_model_type
@@ -1593,7 +1608,7 @@ def record_queue_error(state, queue, error, abort= False):
 
     for i, task in enumerate(queue):
         params = task["params"]
-        client_id= params.get("client_id", "")
+        client_id= params.get("client_id", "") or ""
         if len(client_id):
             queue_errors[client_id] = (error, abort, i>0)
 
@@ -1641,7 +1656,7 @@ def load_queue_action(filepath, state, evt:gr.EventData):
             if isinstance(inline_queue_source, dict):
                 inline_queue_source = [{"id": 0, "params": inline_queue_source}]
             record_queue_error(state, inline_queue_source or [], error)
-            gr.Warning(f"Failed to unpack innline queue: {error[:200]}")
+            gr.Warning(f"Failed to unpack inline queue: {error[:200]}")
             return update_queue_data(original_queue)
 
     elif evt.target == None:
@@ -2135,6 +2150,9 @@ if not Path(config_load_filename).is_file():
         "model_hierarchy_type": 1,
         "mmaudio_mode": 0,
         "mmaudio_persistence": 1,
+        "flashvsr_mode": 0,
+        "flashvsr_persistence": 1,
+        "flashvsr_topk_ratio": 0.0,
         "rife_version": "v4",
         **get_deepy_default_runtime_config(),
         "prompt_enhancer_quantization": "quanto_int8",
@@ -2168,6 +2186,17 @@ MMAUDIO_PERSIST_UNLOAD = 1
 MMAUDIO_PERSIST_RAM = 2
 MMAUDIO_STANDARD = "mmaudio_large_44k_v2.pth"
 MMAUDIO_ALTERNATE = "mmaudio_large_44k_gold_8.5k_final_fp16.safetensors"
+from postprocessing.flashvsr.wgp_bridge import FlashVSRBridge
+flashvsr = FlashVSRBridge(server_config, fl, lambda **kwargs: process_files_def(**kwargs), lambda: vae_config)
+edit_mode_handlers = [flashvsr]
+
+
+def query_edit_spatial_upsampling_choices(include_name=True, enabled_only=False):
+    return [choice for handler in edit_mode_handlers if not enabled_only or not hasattr(handler, "enabled") or handler.enabled() for choice in handler.query_edit_mode_def(include_name=include_name).get("spatial_upsampling_choices", [])]
+
+
+def find_edit_spatial_upsampler(spatial_upsampling):
+    return next((handler for handler in edit_mode_handlers if handler.is_upsampling(spatial_upsampling)), None)
 
 def _normalize_mmaudio_config(config):
     mode = config.get("mmaudio_mode", None)
@@ -2804,6 +2833,7 @@ if not "image_output_codec" in server_config: server_config["image_output_codec"
 if not "audio_output_codec" in server_config: server_config["audio_output_codec"]= "aac_128"
 if not "audio_stand_alone_output_codec" in server_config: server_config["audio_stand_alone_output_codec"]= "wav"
 if not "rife_version" in server_config: server_config["rife_version"] = "v4"
+flashvsr.normalize_config()
 if "loras_root" not in server_config: server_config["loras_root"] = DEFAULT_LORA_ROOT
 if "save_queue_if_crash" not in server_config: server_config["save_queue_if_crash"] = 1
 if "keep_intermediate_sliding_windows" not in server_config: server_config["keep_intermediate_sliding_windows"] = 1
@@ -3008,6 +3038,9 @@ def download_mmaudio():
     if enhancer_def is not None:
         process_files_def(**enhancer_def)
 
+def release_flashvsr_vram():
+    flashvsr.release_vram()
+
 
 def download_file(url,filename):
     url = url.split("|")[0]
@@ -3054,6 +3087,9 @@ def query_global_shared_model_files():
     mmaudio_def = query_mmaudio_download_def(enabled_only=False)
     if mmaudio_def is not None:
         shared_defs.append(mmaudio_def)
+    flashvsr_def = flashvsr.query_download_def(enabled_only=False)
+    if flashvsr_def is not None:
+        shared_defs.append(flashvsr_def)
     return shared_defs
 
 download_shared_done = False
@@ -3827,10 +3863,11 @@ def refresh_gallery(state): #, msg
         params = task["params"]
         model_type = params["model_type"] 
         multi_prompts_gen_type = params["multi_prompts_gen_type"]
-        base_model_type = get_base_model_type(model_type)
-        model_def = get_model_def(model_type) 
-        onemorewindow_visible = test_any_sliding_window(base_model_type) and params.get("image_mode",0) == 0 and (not params.get("mode","").startswith("edit_")) and not model_def.get("preprocess_all", False)
-        early_stop_visible = bool(model_def.get("supports_early_stop", False))
+        is_edit_task = _is_edit_task_params(params)
+        base_model_type = None if is_edit_task else get_base_model_type(model_type)
+        model_def = None if is_edit_task else get_model_def(model_type)
+        onemorewindow_visible = model_def is not None and test_any_sliding_window(base_model_type) and params.get("image_mode",0) == 0 and not model_def.get("preprocess_all", False)
+        early_stop_visible = bool(model_def and model_def.get("supports_early_stop", False))
         enhanced = False
         if prompt.startswith(prompt_parser.ENHANCED_PROMPT_PREFIX):
             enhanced = True
@@ -5074,10 +5111,14 @@ def perform_temporal_upsampling(sample, previous_last_frame, temporal_upsampling
     return sample, previous_last_frame, output_fps 
 
 
-def perform_spatial_upsampling(sample, spatial_upsampling):
+def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, flashvsr_continue_cache=None, return_flashvsr_continue_cache=False, vae_tile_size=None, abort_callback=None, progress_callback=None):
     from shared.utils.utils import resize_lanczos 
     if spatial_upsampling == "vae2":
-        return sample
+        return (sample, None) if return_flashvsr_continue_cache else sample
+    edit_upsampler = find_edit_spatial_upsampler(spatial_upsampling)
+    if edit_upsampler is not None:
+        sample, flashvsr_cache = edit_upsampler.upscale(sample, spatial_upsampling, seed=seed, continue_cache=flashvsr_continue_cache, return_continue_cache=return_flashvsr_continue_cache, vae_tile_size=vae_tile_size, abort_callback=abort_callback, progress_callback=progress_callback)
+        return (sample, flashvsr_cache) if return_flashvsr_continue_cache else sample
     method = None
     if spatial_upsampling == "vae1":
         scale = 0.5
@@ -5112,7 +5153,7 @@ def perform_spatial_upsampling(sample, spatial_upsampling):
             return resize_lanczos(frame, h, w, method).unsqueeze(1)
     sample = torch.cat(process_images_multithread(upsample_frames, frames_to_upsample, "upsample", wrap_in_list = False, max_workers=get_default_workers(), in_place=True), dim=1)
     frames_to_upsample = None
-    return sample 
+    return (sample, None) if return_flashvsr_continue_cache else sample
 
 
 def any_audio_track(model_type):
@@ -5161,12 +5202,19 @@ def edit_video(
                 MMAudio_neg_prompt,
                 repeat_generation,
                 audio_source,
+                client_id="",
+                plugin_data=None,
                 **kwargs
                 ):
 
 
 
     gen = get_gen_info(state)
+    api_return_video_uint8, api_return_audio = get_api_output_options(plugin_data)
+    api_options = plugin_data.get("api", {}) if isinstance(plugin_data, dict) and isinstance(plugin_data.get("api", {}), dict) else {}
+    api_suppress_source_audio = bool(api_options.get("suppress_source_audio"))
+    flashvsr_continue_cache = api_options.get("flashvsr_continue_cache")
+    return_flashvsr_continue_cache = bool(api_options.get("return_flashvsr_continue_cache"))
 
     if gen.get("abort", False): return 
     abort = False
@@ -5178,9 +5226,9 @@ def edit_video(
 
     has_already_audio = False
     audio_tracks = []
-    if MMAudio_setting == 0:
+    if MMAudio_setting == 0 and not api_suppress_source_audio:
         audio_tracks, audio_metadata  = extract_audio_tracks(video_source)
-        has_already_audio = len(audio_tracks) > 0
+        has_already_audio = len(audio_tracks) > 0 
     
     if audio_source is not None:
         audio_tracks = [audio_source]
@@ -5200,7 +5248,7 @@ def edit_video(
 
     if mode == "edit_postprocessing":
         if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 or film_grain_intensity > 0:                
-            send_cmd("progress", [0, get_latest_status(state,"Upsampling" if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 else "Adding Film Grain"  )])
+            send_cmd("progress", [0, get_latest_status(state,"Upsampling - Starting" if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 else "Adding Film Grain"  )])
             sample = get_resampled_video(video_source, 0, max_source_video_frames, fps)
             sample = sample.permute(-1,0,1,2)
             frames_count = sample.shape[1] 
@@ -5213,7 +5261,19 @@ def edit_video(
 
 
         if len(spatial_upsampling) > 0:
-            sample = perform_spatial_upsampling(sample, spatial_upsampling )
+            def flashvsr_progress(phase, current_step=None, total_steps=None):
+                phase_text = f"Upsampling - {phase}"
+                gen["progress_phase"] = (phase_text, int(current_step) if current_step is not None else -1)
+                status_msg = get_latest_status(state, phase_text)
+                if current_step is not None and total_steps is not None and int(total_steps) > 0:
+                    send_cmd("progress", [(int(current_step), int(total_steps)), status_msg, int(total_steps)])
+                else:
+                    send_cmd("progress", [0, status_msg])
+            sample = perform_spatial_upsampling(sample, spatial_upsampling, seed=seed, flashvsr_continue_cache=flashvsr_continue_cache, return_flashvsr_continue_cache=return_flashvsr_continue_cache, abort_callback=lambda: gen.get("abort", False), progress_callback=flashvsr_progress)
+            if return_flashvsr_continue_cache:
+                sample, flashvsr_continue_cache = sample
+            if gen.get("abort", False) or sample is None:
+                return
             configs["spatial_upsampling"] = spatial_upsampling
 
         if film_grain_intensity > 0:
@@ -5236,6 +5296,18 @@ def edit_video(
 
         if any_mmaudio or has_already_audio: tmp_path = video_path
         any_change = True
+        if api_return_video_uint8 or api_return_audio or return_flashvsr_continue_cache:
+            store_api_output_artifact(
+                gen,
+                client_id,
+                video_path,
+                "video",
+                sample if api_return_video_uint8 else None,
+                None,
+                None,
+                output_fps,
+                flashvsr_continue_cache=flashvsr_continue_cache if return_flashvsr_continue_cache else None,
+            )
     else:
         video_path = video_source
 
@@ -5290,10 +5362,13 @@ def edit_video(
 
             if configs != None:
                 from shared.utils.video_metadata import extract_source_images, save_video_metadata
-                temp_images_path = get_available_filename(save_path, video_source, force_extension= ".temp")
-                embedded_images = extract_source_images(video_source, temp_images_path)
+                embedded_images = None
+                temp_images_path = None
+                if not bool(api_options.get("suppress_metadata_images")):
+                    temp_images_path = get_available_filename(save_path, video_source, force_extension= ".temp")
+                    embedded_images = extract_source_images(video_source, temp_images_path)
                 save_video_metadata(new_video_path, configs, embedded_images, verbose_level=verbose_level)
-                if os.path.isdir(temp_images_path):
+                if temp_images_path is not None and os.path.isdir(temp_images_path):
                     shutil.rmtree(temp_images_path, ignore_errors= True)
             gen["last_was_audio"] = False
             send_cmd("output")
@@ -5819,12 +5894,15 @@ def generate_video(
     global wan_model, offloadobj, reload_needed
     gen = get_gen_info(state)
     api_return_video_uint8, api_return_audio = get_api_output_options(plugin_data)
+    api_options = plugin_data.get("api", {}) if isinstance(plugin_data, dict) and isinstance(plugin_data.get("api", {}), dict) else {}
+    flashvsr_continue_cache = api_options.get("flashvsr_continue_cache")
+    return_flashvsr_continue_cache = bool(api_options.get("return_flashvsr_continue_cache"))
     gen["early_stop"] = False
     gen["early_stop_forwarded"] = False
     gen["last_progress_args"] = None
     torch.set_grad_enabled(False) 
     if mode.startswith("edit_"):
-        edit_video(send_cmd, state, mode, video_source, seed, temporal_upsampling, spatial_upsampling, film_grain_intensity, film_grain_saturation, MMAudio_setting, MMAudio_prompt, MMAudio_neg_prompt, repeat_generation, audio_source)
+        edit_video(send_cmd, state, mode, video_source, seed, temporal_upsampling, spatial_upsampling, film_grain_intensity, film_grain_saturation, MMAudio_setting, MMAudio_prompt, MMAudio_neg_prompt, repeat_generation, audio_source, client_id=client_id, plugin_data=plugin_data)
         return True
 
     model_def = get_model_def(model_type) 
@@ -6904,14 +6982,27 @@ def generate_video(
 
 
                 if len(temporal_upsampling) > 0 or len(spatial_upsampling) > 0 and not "vae2" in spatial_upsampling:                
-                    send_cmd("progress", [0, get_latest_status(state,"Upsampling")])
+                    send_cmd("progress", [0, get_latest_status(state,"Upsampling - Starting")])
                 
                 output_fps  = fps
                 if len(temporal_upsampling) > 0:
                     sample, previous_last_frame, output_fps = perform_temporal_upsampling(sample, previous_last_frame if sliding_window and window_no > 1 else None, temporal_upsampling, fps)
 
                 if len(spatial_upsampling) > 0:
-                    sample = perform_spatial_upsampling(sample, spatial_upsampling )
+                    def flashvsr_progress(phase, current_step=None, total_steps=None):
+                        phase_text = f"Upsampling - {phase}"
+                        gen["progress_phase"] = (phase_text, int(current_step) if current_step is not None else -1)
+                        status_msg = get_latest_status(state, phase_text)
+                        if current_step is not None and total_steps is not None and int(total_steps) > 0:
+                            send_cmd("progress", [(int(current_step), int(total_steps)), status_msg, int(total_steps)])
+                        else:
+                            send_cmd("progress", [0, status_msg])
+                    sample = perform_spatial_upsampling(sample, spatial_upsampling, seed=seed, flashvsr_continue_cache=flashvsr_continue_cache, return_flashvsr_continue_cache=return_flashvsr_continue_cache, vae_tile_size=VAE_tile_size, abort_callback=lambda: gen.get("abort", False), progress_callback=flashvsr_progress)
+                    if return_flashvsr_continue_cache:
+                        sample, flashvsr_continue_cache = sample
+                    if gen.get("abort", False) or sample is None:
+                        abort = True
+                        break
                 if film_grain_intensity> 0:
                     from postprocessing.film_grain import add_film_grain
                     sample = add_film_grain(sample, film_grain_intensity, film_grain_saturation) 
@@ -7052,13 +7143,13 @@ def generate_video(
                 configs["creation_timestamp"] = int(end_time)
                 # if sample_is_image: configs["is_image"] = True
                 record_file_metadata(video_path, configs, is_image, audio_only, gen, embedded_images=embedded_images, replace_last_file=sliding_window and window_no > 1 and not server_config.get("keep_intermediate_sliding_windows", 1))
-                if api_return_video_uint8 or api_return_audio:
+                if api_return_video_uint8 or api_return_audio or return_flashvsr_continue_cache:
                     media_type = "audio" if audio_only else ("image" if is_image else "video")
                     artifact_audio = output_new_audio_data if api_return_audio else None
                     if artifact_audio is None and api_return_audio and audio_only and sample is not None:
                         artifact_audio = sample.squeeze(0).detach().cpu().float().numpy()
                     artifact_video = output_video_frames if api_return_video_uint8 else None
-                    store_api_output_artifact(gen, client_id, video_path, media_type, artifact_video, artifact_audio, output_audio_sampling_rate, output_fps if not audio_only else None, hdr=bool(sample_is_hdr))
+                    store_api_output_artifact(gen, client_id, video_path, media_type, artifact_video, artifact_audio, output_audio_sampling_rate, output_fps if not audio_only else None, hdr=bool(sample_is_hdr), flashvsr_continue_cache=flashvsr_continue_cache if return_flashvsr_continue_cache else None)
 
                 embedded_images = None
                 # Play notification sound for single video
@@ -7252,7 +7343,7 @@ def process_tasks(state):
                 try:
                     import inspect
                     model_type = params.get('model_type')
-                    if model_type:
+                    if model_type and not _is_edit_task_params(params):
                         default_settings = get_default_settings(model_type)
                         expected_args = set(inspect.signature(generate_video).parameters.keys())
                         for arg_name in expected_args:
@@ -7372,6 +7463,14 @@ def validate_task(task, state):
     """Validate a task's settings. Returns (updated params dict or None, validation error)."""
     params = task.get('params', {})
     model_type = params.get('model_type')
+    if _is_edit_task_params(params):
+        inputs = primary_settings.copy()
+        inputs.update(params)
+        inputs["model_type"] = "" if model_type is None else model_type
+        inputs.setdefault("prompt", "Edit")
+        inputs.setdefault("image_mode", 0)
+        inputs.setdefault("client_id", "")
+        return inputs, ""
     if not model_type:
         print("  [SKIP] No model_type specified")
         return None, "No model_type specified"
@@ -10679,7 +10778,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
 
                     with gr.Column():
                         gr.Markdown("<B>Upsampling - postprocessing that may improve fluidity and the size of the video</B>")
-                        def gen_upsampling_dropdowns(temporal_upsampling, spatial_upsampling , film_grain_intensity, film_grain_saturation, element_class= None, max_height= None, image_outputs = False, any_vae_upsampling = False):
+                        def gen_upsampling_dropdowns(temporal_upsampling, spatial_upsampling , film_grain_intensity, film_grain_saturation, element_class= None, max_height= None, image_outputs = False, any_vae_upsampling = False, always_show_flashvsr = False):
                             temporal_upsampling = gr.Dropdown(
                                 choices=[
                                     ("Disabled", ""),
@@ -10694,12 +10793,15 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                                 # max_height = max_height
                             )
                             
-                            spatial_upsampling = gr.Dropdown(
-                                choices=[
+                            spatial_upsampling_choices = [
                                     ("Disabled", ""),
                                     ("Lanczos x1.5", "lanczos1.5"), 
                                     ("Lanczos x2.0", "lanczos2"), 
-                                ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else []) ,
+                            ] + ([("VAE x1.0 (refined)", "vae1"),("VAE x2.0", "vae2")] if any_vae_upsampling else [])
+                            if not image_outputs:
+                                spatial_upsampling_choices += query_edit_spatial_upsampling_choices(include_name=True, enabled_only=not always_show_flashvsr)
+                            spatial_upsampling = gr.Dropdown(
+                                choices=spatial_upsampling_choices,
                                 value=spatial_upsampling,
                                 visible=True,
                                 scale = 1,
@@ -11066,7 +11168,7 @@ def generate_video_tab(update_form = False, state_dict = None, ui_defaults = Non
                     with gr.Tab("Post Processing", id= "post_processing", visible = True) as video_postprocessing_tab:
                         with gr.Group(elem_classes= "postprocess"):
                             with gr.Column():
-                                PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation = gen_upsampling_dropdowns("",  "", 0, 0.5, element_class ="postprocess", image_outputs = False)
+                                PP_temporal_upsampling, PP_spatial_upsampling, PP_film_grain_intensity, PP_film_grain_saturation = gen_upsampling_dropdowns("",  "", 0, 0.5, element_class ="postprocess", image_outputs = False, always_show_flashvsr = True)
                         with gr.Row():
                             video_info_postprocessing_btn = gr.Button("Apply Postprocessing", size ="sm", visible=True)
                             video_info_eject_video2_btn = gr.Button("Eject Video", size ="sm", visible=True)

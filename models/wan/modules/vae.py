@@ -818,23 +818,33 @@ class WanVAE:
         self.model._model_dtype = dtype
 
     @staticmethod
-    def get_VAE_tile_size(vae_config, device_mem_capacity, mixed_precision):
+    def get_VAE_tile_size(vae_config, device_mem_capacity, mixed_precision, output_height=None, output_width=None):
         # VAE Tiling
         if vae_config == 0:
             if mixed_precision:
                 device_mem_capacity = device_mem_capacity / 2
             if device_mem_capacity >= 24000:
-                use_vae_config = 1            
-            elif device_mem_capacity >= 8000:
-                use_vae_config = 2
-            else:          
+                use_vae_config = 1
+            elif device_mem_capacity >= 16000:
                 use_vae_config = 3
+            elif device_mem_capacity >= 8000:
+                use_vae_config = 4
+            else:          
+                use_vae_config = 5
         else:
-            use_vae_config = vae_config
+            # Keep WGP's historical public presets; Wan inserts one internal tiers between presets 1 and 3.
+            use_vae_config = vae_config if vae_config == 1 else vae_config + 2
+
+        if output_height is not None and output_width is not None and int(output_height) * int(output_width) > 1920 * 1088:
+            use_vae_config = min(use_vae_config + 1, 4)
 
         if use_vae_config == 1:
             VAE_tile_size = 0  
         elif use_vae_config == 2:
+            VAE_tile_size = 1024 
+        elif use_vae_config == 3:
+            VAE_tile_size = 512 
+        elif use_vae_config == 4:
             VAE_tile_size = 256  
         else: 
             VAE_tile_size = 128  

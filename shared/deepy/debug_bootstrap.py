@@ -184,7 +184,6 @@ def bootstrap_deepy_debug() -> None:
     sys.argv = _force_verbose_level(list(sys.argv))
     _DEBUG_TARGET_DIR = _resolve_debug_dir(debug_dir)
     _install_stream_tee()
-    ensure_deepy_debug_started()
 
 
 def ensure_deepy_debug_started() -> bool:
