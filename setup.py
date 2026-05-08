@@ -844,8 +844,7 @@ if __name__ == "__main__":
             print("\n[*] Updates found. Installing/Verifying requirements...")
             install_fmt = ENV_TEMPLATES[env_data['type']]['install']
             pip_cmd = install_fmt.format(dir=env_data['path'])
-            run_cmd(f"{pip_cmd} -r requirements.txt")            
-            install_plugin_requirements(pip_cmd)
+            run_cmd(f"{pip_cmd} -r requirements.txt")
         else:
             print("\n[*] Code is already up to date. Skipping requirements installation.")
 
