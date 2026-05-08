@@ -184,7 +184,7 @@ class FlashVSRBridge:
             continue_cache=continue_cache,
             return_continue_cache=return_continue_cache,
             persistent_models=persistence == self.PERSIST_RAM,
-            vae_tile_size=self.vae_tile_size(output_height, output_width) if variant == "full" and vae_tile_size is None else vae_tile_size,
+            vae_tile_size=self.vae_tile_size(output_height, output_width) if vae_tile_size is None else vae_tile_size,
             topk_ratio=self.topk_ratio(),
             abort_callback=abort_callback,
             progress_callback=progress_callback,

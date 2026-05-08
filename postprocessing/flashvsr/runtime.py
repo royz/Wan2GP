@@ -145,6 +145,42 @@ def _crop_output_frames(frames: torch.Tensor, height: int, width: int) -> torch.
     return frames[..., :height, :width].contiguous()
 
 
+def _decoded_frames_to_cpu(frames: torch.Tensor, frame_count: int, height: int, width: int) -> torch.Tensor:
+    frames = frames.detach()[0, :, :frame_count, :height, :width]
+    if frames.device.type == "cpu" and frames.dtype == torch.float32 and frames.is_contiguous():
+        return frames
+    frames_cpu = torch.empty(tuple(frames.shape), dtype=torch.float32, device="cpu")
+    frames_cpu.copy_(frames)
+    return frames_cpu
+
+
+def _nested_tensors_to(value: Any, device: torch.device | str, dtype: torch.dtype | None = None) -> Any:
+    if torch.is_tensor(value):
+        return value.detach().to(device=device, dtype=dtype or value.dtype)
+    if isinstance(value, list):
+        return [_nested_tensors_to(item, device, dtype) for item in value]
+    return value
+
+
+def _tcdecoder_mem_halo_latents(tcdecoder: torch.nn.Module) -> int:
+    radius = 0.0
+    jump = 1.0
+    decoder = tcdecoder.taehv.decoder if hasattr(tcdecoder, "taehv") else tcdecoder.decoder
+    for module in decoder:
+        if isinstance(module, torch.nn.Conv2d):
+            kernel = module.kernel_size[0] if isinstance(module.kernel_size, tuple) else int(module.kernel_size)
+            radius += ((kernel - 1) / 2) * jump
+        elif module.__class__.__name__ == "MemBlock":
+            for submodule in module.conv:
+                if isinstance(submodule, torch.nn.Conv2d):
+                    kernel = submodule.kernel_size[0] if isinstance(submodule.kernel_size, tuple) else int(submodule.kernel_size)
+                    radius += ((kernel - 1) / 2) * jump
+        elif isinstance(module, torch.nn.Upsample):
+            scale = module.scale_factor[0] if isinstance(module.scale_factor, tuple) else module.scale_factor
+            jump /= float(scale or 1)
+    return max(1, int(math.ceil(radius)))
+
+
 def _report_progress(progress_callback, phase: str, current_step: int | None = None, total_steps: int | None = None) -> None:
     if callable(progress_callback):
         progress_callback(phase, current_step, total_steps)
@@ -188,14 +224,11 @@ def _wavelet_color_fix(frames: torch.Tensor, lq_video: torch.Tensor) -> torch.Te
         end = min(start + 4, frames.shape[2])
         frame_chunk = frames[:, :, start:end]
         lq_chunk = lq_video[:, :, start:end].to(device=frames.device, dtype=frames.dtype)
-        flat_frames = frame_chunk.permute(0, 2, 1, 3, 4).reshape(-1, frames.shape[1], frames.shape[3], frames.shape[4])
-        flat_lq = lq_chunk.permute(0, 2, 1, 3, 4).reshape_as(flat_frames)
-        mean_frames = flat_frames.mean(dim=(2, 3), keepdim=True)
-        std_frames = flat_frames.std(dim=(2, 3), keepdim=True).clamp_min_(1e-5)
-        mean_lq = flat_lq.mean(dim=(2, 3), keepdim=True)
-        std_lq = flat_lq.std(dim=(2, 3), keepdim=True).clamp_min_(1e-5)
-        flat_frames.sub_(mean_frames).div_(std_frames).mul_(std_lq).add_(mean_lq).clamp_(-1.0, 1.0)
-        frame_chunk.copy_(flat_frames.reshape(frames.shape[0], end - start, frames.shape[1], frames.shape[3], frames.shape[4]).permute(0, 2, 1, 3, 4))
+        mean_frames = frame_chunk.mean(dim=(3, 4), keepdim=True)
+        std_frames = frame_chunk.std(dim=(3, 4), keepdim=True).clamp_min_(1e-5)
+        mean_lq = lq_chunk.mean(dim=(3, 4), keepdim=True)
+        std_lq = lq_chunk.std(dim=(3, 4), keepdim=True).clamp_min_(1e-5)
+        frame_chunk.sub_(mean_frames).div_(std_frames).mul_(std_lq).add_(mean_lq).clamp_(-1.0, 1.0)
     return frames
 
 
@@ -204,14 +237,12 @@ def _wavelet_color_fix_from_sample(frames: torch.Tensor, sample: torch.Tensor, s
         end = min(start + 4, int(frames.shape[2]), int(sample.shape[1]))
         lq_chunk = _prepare_conditioning_range(sample, start, end, output_height, output_width, padded_output_height, padded_output_width, dtype=frames.dtype).unsqueeze(0)
         frame_chunk = frames[:, :, start:end]
-        flat_frames = frame_chunk.permute(0, 2, 1, 3, 4).reshape(-1, frames.shape[1], frames.shape[3], frames.shape[4])
-        flat_lq = lq_chunk.to(device=frames.device, dtype=frames.dtype).permute(0, 2, 1, 3, 4).reshape_as(flat_frames)
-        mean_frames = flat_frames.mean(dim=(2, 3), keepdim=True)
-        std_frames = flat_frames.std(dim=(2, 3), keepdim=True).clamp_min_(1e-5)
-        mean_lq = flat_lq.mean(dim=(2, 3), keepdim=True)
-        std_lq = flat_lq.std(dim=(2, 3), keepdim=True).clamp_min_(1e-5)
-        flat_frames.sub_(mean_frames).div_(std_frames).mul_(std_lq).add_(mean_lq).clamp_(-1.0, 1.0)
-        frame_chunk.copy_(flat_frames.reshape(frames.shape[0], end - start, frames.shape[1], frames.shape[3], frames.shape[4]).permute(0, 2, 1, 3, 4))
+        lq_chunk = lq_chunk.to(device=frames.device, dtype=frames.dtype)
+        mean_frames = frame_chunk.mean(dim=(3, 4), keepdim=True)
+        std_frames = frame_chunk.std(dim=(3, 4), keepdim=True).clamp_min_(1e-5)
+        mean_lq = lq_chunk.mean(dim=(3, 4), keepdim=True)
+        std_lq = lq_chunk.std(dim=(3, 4), keepdim=True).clamp_min_(1e-5)
+        frame_chunk.sub_(mean_frames).div_(std_frames).mul_(std_lq).add_(mean_lq).clamp_(-1.0, 1.0)
     return frames
 
 
@@ -354,6 +385,63 @@ class FlashVSRRuntime:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _decode_tcdecoder(self, latents: torch.Tensor, sample: torch.Tensor, lq_start: int, lq_end: int, output_height: int, output_width: int, padded_output_height: int, padded_output_width: int, tile_size: int, tile_mems: dict[tuple[int, int], Any] | None, abort_callback=None, progress_callback=None, progress_step: int | None = None, progress_total: int | None = None) -> tuple[torch.Tensor | None, dict[tuple[int, int], Any] | None]:
+        if self.tcdecoder is None:
+            raise RuntimeError("FlashVSR tiny variants require TCDecoder.")
+        _report_progress(progress_callback, "TCDecoder Decoding", progress_step, progress_total)
+        tile_size = int(tile_size or 0)
+        cur_lq = _prepare_conditioning_range(sample, lq_start, lq_end, output_height, output_width, padded_output_height, padded_output_width, dtype=self.dtype).unsqueeze(0)
+        if tile_size <= 0 or (padded_output_height <= tile_size and padded_output_width <= tile_size):
+            cur_lq = cur_lq.to(self.device, dtype=self.dtype)
+            frames = self.tcdecoder.decode_video(latents.transpose(1, 2), parallel=False, show_progress_bar=False, cond=cur_lq).transpose(1, 2).mul_(2).sub_(1)
+            del cur_lq
+            _report_progress(progress_callback, "TCDecoder Decoding", progress_step + 1 if progress_step is not None else None, progress_total)
+            return frames, tile_mems
+
+        halo = _tcdecoder_mem_halo_latents(self.tcdecoder)
+        latent_tile = max(1, tile_size // 8)
+        latent_height = padded_output_height // 8
+        latent_width = padded_output_width // 8
+        tile_mems = {} if tile_mems is None else tile_mems
+        frames_out = None
+        for latent_y0 in range(0, latent_height, latent_tile):
+            latent_y1 = min(latent_y0 + latent_tile, latent_height)
+            write_y0, write_y1 = latent_y0 * 8, min(latent_y1 * 8, output_height)
+            if write_y1 <= write_y0:
+                continue
+            expanded_y0, expanded_y1 = max(0, latent_y0 - halo), min(latent_height, latent_y1 + halo)
+            crop_y0 = (latent_y0 - expanded_y0) * 8
+            for latent_x0 in range(0, latent_width, latent_tile):
+                if _abort_requested(abort_callback):
+                    del cur_lq
+                    return None, tile_mems
+                latent_x1 = min(latent_x0 + latent_tile, latent_width)
+                write_x0, write_x1 = latent_x0 * 8, min(latent_x1 * 8, output_width)
+                if write_x1 <= write_x0:
+                    continue
+                expanded_x0, expanded_x1 = max(0, latent_x0 - halo), min(latent_width, latent_x1 + halo)
+                crop_x0 = (latent_x0 - expanded_x0) * 8
+                tile_key = (latent_y0, latent_x0)
+                saved_mem = tile_mems.get(tile_key)
+                if saved_mem is None:
+                    self.tcdecoder.clean_mem()
+                else:
+                    self.tcdecoder.mem = _nested_tensors_to(saved_mem, self.device, self.dtype)
+                cur_lq_tile = cur_lq[:, :, :, expanded_y0 * 8:expanded_y1 * 8, expanded_x0 * 8:expanded_x1 * 8].contiguous().to(self.device, dtype=self.dtype)
+                cur_latents = latents[:, :, :, expanded_y0:expanded_y1, expanded_x0:expanded_x1].to(self.device, dtype=self.dtype)
+                tile_frames = self.tcdecoder.decode_video(cur_latents.transpose(1, 2), parallel=False, show_progress_bar=False, cond=cur_lq_tile).transpose(1, 2).mul_(2).sub_(1)
+                tile_mems[tile_key] = _nested_tensors_to(self.tcdecoder.mem, "cpu")
+                self.tcdecoder.clean_mem()
+                tile_frames = tile_frames[:, :, :, crop_y0:crop_y0 + latent_y1 * 8 - latent_y0 * 8, crop_x0:crop_x0 + latent_x1 * 8 - latent_x0 * 8]
+                if frames_out is None:
+                    frames_out = torch.empty((tile_frames.shape[0], tile_frames.shape[1], tile_frames.shape[2], output_height, output_width), dtype=torch.float32, device="cpu")
+                tile_cpu = tile_frames[:, :, :, :write_y1 - write_y0, :write_x1 - write_x0].detach().cpu().float()
+                frames_out[:, :, :, write_y0:write_y1, write_x0:write_x1].copy_(tile_cpu)
+                del cur_lq_tile, cur_latents, tile_frames, tile_cpu
+        del cur_lq
+        _report_progress(progress_callback, "TCDecoder Decoding", progress_step + 1 if progress_step is not None else None, progress_total)
+        return frames_out, tile_mems
+
     def _decode_vae(self, latents: torch.Tensor, vae_tile_size: int | None) -> torch.Tensor:
         if self.vae is None:
             raise RuntimeError("FlashVSR full variant requires the Wan VAE.")
@@ -423,6 +511,14 @@ class FlashVSRRuntime:
         if self.vae is not None:
             self.vae.model.clear_cache()
         print(f"[FlashVSR] Stream KV cache windows: {max(1, int(FLASHVSR_KV_CACHE_WINDOWS))}")
+        tcdecoder_tile_size = int(vae_tile_size or 0) if self.tcdecoder is not None else 0
+        tcdecoder_tile_mems = None
+        if self.tcdecoder is not None:
+            if tcdecoder_tile_size > 0 and (padded_output_height > tcdecoder_tile_size or padded_output_width > tcdecoder_tile_size):
+                print(f"[FlashVSR] TCDecoder spatial tiling policy: tile_size={tcdecoder_tile_size}px, halo={_tcdecoder_mem_halo_latents(self.tcdecoder) * 8}px")
+                tcdecoder_tile_mems = {}
+            else:
+                print("[FlashVSR] TCDecoder spatial tiling policy: tile_size=0px")
         generator = torch.Generator(device="cpu").manual_seed(0 if seed is None or seed < 0 else int(seed))
         latents = torch.randn((1, 16, (num_frames - 1) // 4, padded_output_height // 8, padded_output_width // 8), generator=generator, device="cpu", dtype=torch.float32).to(self.dtype)
         process_total = (num_frames - 1) // 8 - 2
@@ -469,9 +565,11 @@ class FlashVSRRuntime:
             if noise_pred is None:
                 return abort_result()
             cur_latents = cur_latents - noise_pred
+            _report_progress(progress_callback, "Denoising", process_idx + 1, process_total)
             if self.variant == FLASHVSR_VARIANT_TINY_LONG:
-                cur_lq = _prepare_conditioning_range(sample, lq_pre_idx, lq_cur_idx, output_height, output_width, padded_output_height, padded_output_width, dtype=self.dtype).unsqueeze(0).to(self.device, dtype=self.dtype)
-                cur_frames = self.tcdecoder.decode_video(cur_latents.transpose(1, 2), parallel=False, show_progress_bar=False, cond=cur_lq).transpose(1, 2).mul_(2).sub_(1)
+                cur_frames, tcdecoder_tile_mems = self._decode_tcdecoder(cur_latents, sample, lq_pre_idx, lq_cur_idx, output_height, output_width, padded_output_height, padded_output_width, tcdecoder_tile_size, tcdecoder_tile_mems, abort_callback=abort_callback, progress_callback=progress_callback, progress_step=process_idx, progress_total=process_total)
+                if cur_frames is None:
+                    return abort_result()
                 cur_frames = _crop_output_frames(cur_frames.detach().cpu(), output_height, output_width)
                 copy_frames = min(int(cur_frames.shape[2]), input_frames - frames_cursor)
                 if copy_frames > 0:
@@ -480,11 +578,10 @@ class FlashVSRRuntime:
                     frames_out[:, :, frames_cursor:frames_cursor + copy_frames].copy_(cur_frames[:, :, :copy_frames].float())
                     frames_cursor += copy_frames
                 lq_pre_idx = lq_cur_idx
-                del cur_lq, cur_frames
+                del cur_frames
             else:
                 latents[:, :, latent_start:latent_end].copy_(cur_latents.detach().cpu())
             lq_layer_chunks = None
-            _report_progress(progress_callback, "Denoising", process_idx + 1, process_total)
         self.lq_proj.clear_cache()
         pre_cache_k = pre_cache_v = None
         self.dit.clear_cross_kv()
@@ -495,9 +592,33 @@ class FlashVSRRuntime:
             if self.variant == FLASHVSR_VARIANT_TINY:
                 if _abort_requested(abort_callback):
                     return abort_result()
-                full_lq = _prepare_conditioning_range(sample, 0, lq_cur_idx, output_height, output_width, padded_output_height, padded_output_width, dtype=self.dtype).unsqueeze(0).to(self.device, dtype=self.dtype)
-                frames = self.tcdecoder.decode_video(latents.transpose(1, 2), parallel=False, show_progress_bar=False, cond=full_lq).transpose(1, 2).mul_(2).sub_(1)
-                del full_lq
+                self.tcdecoder.clean_mem()
+                frames_out = None
+                frames_cursor = 0
+                lq_pre_idx = 0
+                for decode_idx in range(process_total):
+                    if _abort_requested(abort_callback):
+                        return abort_result()
+                    if decode_idx == 0:
+                        lq_cur_idx = 21
+                        latent_start, latent_end = 0, 6
+                    else:
+                        lq_cur_idx = decode_idx * 8 + 21
+                        latent_start, latent_end = 4 + decode_idx * 2, 6 + decode_idx * 2
+                    cur_latents = latents[:, :, latent_start:latent_end].to(self.device, dtype=self.dtype)
+                    cur_frames, tcdecoder_tile_mems = self._decode_tcdecoder(cur_latents, sample, lq_pre_idx, lq_cur_idx, output_height, output_width, padded_output_height, padded_output_width, tcdecoder_tile_size, tcdecoder_tile_mems, abort_callback=abort_callback, progress_callback=progress_callback, progress_step=decode_idx, progress_total=process_total)
+                    if cur_frames is None:
+                        return abort_result()
+                    cur_frames = _crop_output_frames(cur_frames.detach().cpu(), output_height, output_width)
+                    copy_frames = min(int(cur_frames.shape[2]), input_frames - frames_cursor)
+                    if copy_frames > 0:
+                        if frames_out is None:
+                            frames_out = torch.empty((cur_frames.shape[0], cur_frames.shape[1], input_frames, output_height, output_width), dtype=torch.float32, device="cpu")
+                        frames_out[:, :, frames_cursor:frames_cursor + copy_frames].copy_(cur_frames[:, :, :copy_frames].float())
+                        frames_cursor += copy_frames
+                    lq_pre_idx = lq_cur_idx
+                    del cur_latents, cur_frames
+                frames = frames_out
             else:
                 if _abort_requested(abort_callback):
                     return abort_result()
@@ -507,15 +628,19 @@ class FlashVSRRuntime:
             self.tcdecoder.clean_mem()
         if self.vae is not None:
             self.vae.model.clear_cache()
-        frames = _crop_output_frames(frames.detach().cpu(), output_height, output_width).float()
-        frames = frames[:, :, :input_frames]
-        frames = _wavelet_color_fix_from_sample(frames, sample, scale, output_height, output_width, padded_output_height, padded_output_width)
-        frames = frames[0].detach().float().cpu().clamp(-1.0, 1.0)
-        frames = _apply_continue_cache(frames, continue_cache)
-        cache = _make_continue_cache(frames, scale, self.variant) if return_continue_cache else None
-        sample = latents = frames_out = pre_cache_k = pre_cache_v = None
+        latents = frames_out = pre_cache_k = pre_cache_v = tcdecoder_tile_mems = None
         noise_pred = cur_latents = lq_layer_chunks = None
         lq_chunk = cur = cur_lq = cur_frames = None
+        decoded_frames = frames
+        frames = _decoded_frames_to_cpu(decoded_frames, input_frames, output_height, output_width)
+        del decoded_frames
+        gc.collect()
+        _report_progress(progress_callback, "Color Correction")
+        _wavelet_color_fix_from_sample(frames.unsqueeze(0), sample, scale, output_height, output_width, output_height, output_width)
+        frames.clamp_(-1.0, 1.0)
+        frames = _apply_continue_cache(frames, continue_cache)
+        cache = _make_continue_cache(frames, scale, self.variant) if return_continue_cache else None
+        sample = None
         self._unload_mmgp()
         if not persistent_models:
             self.release()

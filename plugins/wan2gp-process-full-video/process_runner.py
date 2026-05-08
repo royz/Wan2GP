@@ -424,6 +424,8 @@ class ProcessRunner:
                 return {"elapsed_seconds": elapsed_seconds, "eta_seconds": eta_seconds}
 
             if len(plans) == 0:
+                if system_handler is not None and callable(getattr(system_handler, "delete_continue_cache", None)):
+                    system_handler.delete_continue_cache(output_path)
                 yield self.ui_update(status_ui.render_chunk_status_html(total_chunks_display, completed_chunks, completed_chunks, "Completed", "Existing output already covers the requested range.", continued=continued_mode, **_timing_kwargs()), output_path, str(time.time_ns()), start_enabled=True, abort_enabled=False)
                 return
             planning_text = f"Resuming from {resumed_unique_frames} frame(s) already written." if resumed_unique_frames > 0 else f"Preparing {len(plans)} chunk(s)..."
@@ -600,9 +602,11 @@ class ProcessRunner:
             if process_is_hdr:
                 output_process_metadata["hdr"] = True
             metadata_written = process_metadata.store_output_metadata(metadata_target_path, metadata_source_path, source_path=source_path, process_name=process_display_name, source_start_seconds=start_seconds, start_frame=start_frame, fps_float=fps_float, selected_audio_track=selected_audio_track, total_generation_time=total_generation_time, actual_frame_count=actual_output_frames, process_metadata=output_process_metadata, verbose_level=verbose_level)
-            completed_output = not write_state.stopped and total_written_unique_frames >= requested_unique_frames
+            completed_output = not write_state.stopped and (total_written_unique_frames >= requested_unique_frames or completed_chunks >= total_chunks_display)
             if system_handler is not None and completed_output and callable(getattr(system_handler, "delete_continue_cache", None)):
-                system_handler.delete_continue_cache(metadata_target_path)
+                for cache_output_path in dict.fromkeys([metadata_target_path, output_path, write_state.output_path_for_write]):
+                    if cache_output_path:
+                        system_handler.delete_continue_cache(cache_output_path)
                 continue_cache = None
             elif system_handler is not None and continue_cache is not None and hasattr(system_handler, "save_continue_cache"):
                 system_handler.save_continue_cache(continue_cache, metadata_target_path, metadata=output_process_metadata)
