@@ -242,6 +242,15 @@ def run_cmd(cmd, env_vars=None):
 
     subprocess.run(cmd, shell=True, check=True, env=custom_env)
 
+def install_plugin_requirements(pip_cmd):
+    plugins_dir = "plugins"
+    if os.path.exists(plugins_dir) and os.path.isdir(plugins_dir):
+        for entry in os.listdir(plugins_dir):
+            plugin_req = os.path.join(plugins_dir, entry, "requirements.txt")
+            if os.path.isfile(plugin_req):
+                print(f"\n[*] Installing requirements for plugin '{entry}'...")
+                run_cmd(f"{pip_cmd} -r \"{plugin_req}\"")
+
 def get_env_details(name, env_data):
     env_type = env_data["type"]
     dir_name = env_data["path"]
@@ -352,6 +361,8 @@ def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k,
         if k in config['components']['kernels']:
             cmd = resolve_cmd(config['components']['kernels'][k]['cmd'])
             if cmd: run_cmd(f"{pip} {cmd}")
+            
+    install_plugin_requirements(pip)
 
 def menu(title, options, recommended_key=None):
     print(f"\n--- {title} ---")
@@ -818,8 +829,9 @@ if __name__ == "__main__":
         if needs_install:
             print("\n[*] Updates found. Installing/Verifying requirements...")
             install_fmt = ENV_TEMPLATES[env_data['type']]['install']
-            cmd = f"{install_fmt.format(dir=env_data['path'])} -r requirements.txt"
-            run_cmd(cmd)
+            pip_cmd = install_fmt.format(dir=env_data['path'])
+            run_cmd(f"{pip_cmd} -r requirements.txt")            
+            install_plugin_requirements(pip_cmd)
         else:
             print("\n[*] Code is already up to date. Skipping requirements installation.")
 
