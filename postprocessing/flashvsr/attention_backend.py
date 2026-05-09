@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import traceback
 from typing import Callable
 
 import torch
@@ -10,28 +12,128 @@ _SPARSE_ATTENTION: Callable | None = None
 _BACKEND_NAME: str | None = None
 _BACKEND_ERROR: str | None = None
 _PRINTED_BACKEND = False
+_PRINTED_IMPORT_ERRORS: set[str] = set()
+_REQUIREMENTS_MESSAGE = "FlashVSR requires both SpargeAttn kernels and Triton."
+_INSTALL_MESSAGE = "Install them from docs/INSTALLATION.md and restart WanGP."
+_DEPENDENCIES = (("triton", "Triton"), ("spas_sage_attn", "SpargeAttn"))
+_ARCH_KERNELS = {
+    "sm80": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
+    "sm86": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
+    "sm87": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
+    "sm89": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
+    "sm90": ("SM90_ENABLED", "spas_sage_attn.sm90_compile"),
+    "sm100": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
+    "sm120": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
+    "sm121": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
+}
 
 
-def _load_sparge() -> tuple[Callable | None, str | None]:
+def _print_import_error(module_name: str, exc: BaseException) -> None:
+    key = f"{module_name}:{type(exc).__name__}:{exc}"
+    if key in _PRINTED_IMPORT_ERRORS:
+        return
+    _PRINTED_IMPORT_ERRORS.add(key)
+    print(f"[FlashVSR] Importing {module_name} failed:")
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
+def _missing_sparse_attention_dependencies() -> list[str]:
+    missing = []
+    for module_name, display_name in _DEPENDENCIES:
+        if importlib.util.find_spec(module_name) is None:
+            missing.append(display_name)
+    return missing
+
+
+def _missing_dependencies_message(missing: list[str]) -> str:
+    return f"{_REQUIREMENTS_MESSAGE} Missing: {', '.join(missing)}. {_INSTALL_MESSAGE}"
+
+
+def _dependency_import_message(display_name: str, module_name: str, exc: BaseException) -> str:
+    return f"{_REQUIREMENTS_MESSAGE} {display_name} is installed, but importing {module_name} failed. Check the console for the import error, then reinstall from docs/INSTALLATION.md and restart WanGP. Import failed: {type(exc).__name__}: {exc}"
+
+
+def _kernel_load_message(sparge_error: str | None) -> str:
+    return f"{_REQUIREMENTS_MESSAGE} SpargeAttn is installed, but its kernels could not be loaded. Reinstall SpargeAttn from docs/INSTALLATION.md and restart WanGP. SpargeAttn import failed: {sparge_error or 'not installed'}"
+
+
+def _arch_kernel_load_message(arch: str, module_name: str, exc: BaseException | None) -> str:
+    if exc is not None:
+        return f"{_REQUIREMENTS_MESSAGE} SpargeAttn is installed, but importing its {arch} kernel failed. Check the console for the import error, then reinstall SpargeAttn from docs/INSTALLATION.md and restart WanGP. Import failed: {type(exc).__name__}: {exc}"
+    return f"{_REQUIREMENTS_MESSAGE} SpargeAttn is installed, but its {arch} kernel is unavailable. Reinstall SpargeAttn from docs/INSTALLATION.md and restart WanGP. Missing kernel module: {module_name}"
+
+
+def _dependency_import_error() -> str | None:
+    for module_name, display_name in _DEPENDENCIES:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            _print_import_error(module_name, exc)
+            return _dependency_import_message(display_name, module_name, exc)
+    return None
+
+
+def _import_sparge_core():
     try:
-        module = importlib.import_module("shared.spas_sage_attn_core")
-        fn = getattr(module, "block_sparse_sage2_attn_cuda", None)
-        if callable(fn):
-            return fn, "WanGP SpargeAttn block_sparse_sage2_attn_cuda"
+        return importlib.import_module("shared.spas_sage_attn_core"), None
     except Exception as exc:
+        _print_import_error("shared.spas_sage_attn_core", exc)
         return None, f"{type(exc).__name__}: {exc}"
-    return None, "WanGP SpargeAttn block_sparse_sage2_attn_cuda not found"
+
+
+def _current_cuda_arch() -> str | None:
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return f"sm{major}{minor}"
+
+
+def _arch_kernel_error(module, arch: str | None) -> str | None:
+    if arch is None or arch not in _ARCH_KERNELS:
+        return None
+    flag_name, module_name = _ARCH_KERNELS[arch]
+    if getattr(module, flag_name, False):
+        return None
+    try:
+        importlib.import_module(module_name)
+    except Exception as exc:
+        _print_import_error(module_name, exc)
+        return _arch_kernel_load_message(arch, module_name, exc)
+    return _arch_kernel_load_message(arch, module_name, None)
+
+
+def _sparse_attention_requirement_status() -> tuple[Callable | None, str | None, str | None]:
+    missing = _missing_sparse_attention_dependencies()
+    if missing:
+        return None, None, _missing_dependencies_message(missing)
+    dependency_import_error = _dependency_import_error()
+    if dependency_import_error is not None:
+        return None, None, dependency_import_error
+    module, sparge_error = _import_sparge_core()
+    if module is None:
+        return None, None, _kernel_load_message(sparge_error)
+    arch_kernel_error = _arch_kernel_error(module, _current_cuda_arch())
+    if arch_kernel_error is not None:
+        return None, None, arch_kernel_error
+    fn = getattr(module, "block_sparse_sage2_attn_cuda", None)
+    if not callable(fn):
+        return None, None, _kernel_load_message("WanGP SpargeAttn block_sparse_sage2_attn_cuda not found")
+    return fn, "WanGP SpargeAttn block_sparse_sage2_attn_cuda", None
+
+
+def sparse_attention_requirement_message() -> str | None:
+    _, _, message = _sparse_attention_requirement_status()
+    return message
 
 
 def sparge_attention_available() -> bool:
-    sparge_fn, _ = _load_sparge()
-    return sparge_fn is not None
+    return sparse_attention_requirement_message() is None
 
 
 def require_sparge_attention() -> None:
-    sparge_fn, sparge_error = _load_sparge()
-    if sparge_fn is None:
-        raise RuntimeError(f"FlashVSR requires SpargeAttn (`spas_sage_attn`). Install the SpargeAttn kernels from docs/INSTALLATION.md and restart WanGP. SpargeAttn import failed: {sparge_error or 'not installed'}")
+    _, _, message = _sparse_attention_requirement_status()
+    if message is not None:
+        raise RuntimeError(message)
 
 
 def _mask_topk(mask_id: torch.Tensor | None, q: torch.Tensor) -> torch.Tensor | float:
@@ -62,38 +164,41 @@ def _take_mask(mask_id: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
 
 def _load_backend() -> tuple[Callable, str]:
     global _BACKEND_ERROR
-    sparge_fn, sparge_name_or_error = _load_sparge()
-    if sparge_fn is not None:
-        use_qkv_list = sparge_fn.__module__ == "shared.spas_sage_attn_core"
+    sparge_fn, sparge_name_or_error, message = _sparse_attention_requirement_status()
+    if message is not None:
+        _BACKEND_ERROR = message
+        raise RuntimeError(message)
+    if sparge_fn is None:
+        _BACKEND_ERROR = _kernel_load_message(sparge_name_or_error)
+        raise RuntimeError(_BACKEND_ERROR)
 
-        def sparge_attention(qkv_list: list[torch.Tensor], mask_id: torch.Tensor | list[torch.Tensor], recycle_q: bool = False) -> torch.Tensor:
-            if "mask_id" in sparge_fn.__code__.co_varnames:
-                mask_id = _int8_mask(mask_id)
-                if use_qkv_list:
-                    return sparge_fn(qkv_list, mask_id=mask_id, tensor_layout="HND", output_dtype=qkv_list[0].dtype, recycle_q=recycle_q)
-                q, k, v = qkv_list
-                qkv_list.clear()
-                return sparge_fn(q, k, v, mask_id=_take_mask(mask_id), tensor_layout="HND", output_dtype=q.dtype)
-            if "topk" in sparge_fn.__code__.co_varnames:
-                if use_qkv_list:
-                    topk = _mask_topk(mask_id, qkv_list[0])
-                    if isinstance(mask_id, list):
-                        mask_id.clear()
-                    return sparge_fn(qkv_list, is_causal=False, tensor_layout="HND", output_dtype=qkv_list[0].dtype, topk=topk, recycle_q=recycle_q)
-                q, k, v = qkv_list
-                qkv_list.clear()
-                topk = _mask_topk(mask_id, q)
-                if isinstance(mask_id, list):
-                    mask_id.clear()
-                return sparge_fn(q, k, v, is_causal=False, tensor_layout="HND", output_dtype=q.dtype, topk=topk)
+    use_qkv_list = sparge_fn.__module__ == "shared.spas_sage_attn_core"
+
+    def sparge_attention(qkv_list: list[torch.Tensor], mask_id: torch.Tensor | list[torch.Tensor], recycle_q: bool = False) -> torch.Tensor:
+        if "mask_id" in sparge_fn.__code__.co_varnames:
+            mask_id = _int8_mask(mask_id)
+            if use_qkv_list:
+                return sparge_fn(qkv_list, mask_id=mask_id, tensor_layout="HND", output_dtype=qkv_list[0].dtype, recycle_q=recycle_q)
             q, k, v = qkv_list
             qkv_list.clear()
-            return sparge_fn(q, k, v, is_causal=False, tensor_layout="HND", output_dtype=q.dtype)
+            return sparge_fn(q, k, v, mask_id=_take_mask(mask_id), tensor_layout="HND", output_dtype=q.dtype)
+        if "topk" in sparge_fn.__code__.co_varnames:
+            if use_qkv_list:
+                topk = _mask_topk(mask_id, qkv_list[0])
+                if isinstance(mask_id, list):
+                    mask_id.clear()
+                return sparge_fn(qkv_list, is_causal=False, tensor_layout="HND", output_dtype=qkv_list[0].dtype, topk=topk, recycle_q=recycle_q)
+            q, k, v = qkv_list
+            qkv_list.clear()
+            topk = _mask_topk(mask_id, q)
+            if isinstance(mask_id, list):
+                mask_id.clear()
+            return sparge_fn(q, k, v, is_causal=False, tensor_layout="HND", output_dtype=q.dtype, topk=topk)
+        q, k, v = qkv_list
+        qkv_list.clear()
+        return sparge_fn(q, k, v, is_causal=False, tensor_layout="HND", output_dtype=q.dtype)
 
-        return sparge_attention, sparge_name_or_error or "SpargeAttn"
-
-    _BACKEND_ERROR = f"SpargeAttn import failed: {sparge_name_or_error or 'not installed'}"
-    raise RuntimeError(f"FlashVSR requires SpargeAttn (`spas_sage_attn`). Install the SpargeAttn kernels from docs/INSTALLATION.md and restart WanGP. {_BACKEND_ERROR}")
+    return sparge_attention, sparge_name_or_error or "SpargeAttn"
 
 
 def get_sparse_backend_name() -> str:

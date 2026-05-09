@@ -23,12 +23,12 @@ from shared.deepy.config import (
     set_deepy_runtime_config,
 )
 
-def flashvsr_sparge_attention_available():
+def flashvsr_sparse_attention_requirement_message():
     try:
-        from postprocessing.flashvsr.attention_backend import sparge_attention_available
-        return sparge_attention_available()
-    except Exception:
-        return False
+        from postprocessing.flashvsr.attention_backend import sparse_attention_requirement_message
+        return sparse_attention_requirement_message()
+    except Exception as exc:
+        return f"FlashVSR sparse attention dependency check failed: {type(exc).__name__}: {exc}"
 
 
 class ConfigTabPlugin(WAN2GPPlugin):
@@ -565,8 +565,10 @@ class ConfigTabPlugin(WAN2GPPlugin):
 
         flashvsr_mode_choice = int(flashvsr_mode_choice or 0)
         flashvsr_persistence_choice = int(flashvsr_persistence_choice or 1)
-        if flashvsr_mode_choice > 0 and not flashvsr_sparge_attention_available():
-            gr.Info("FlashVSR requires SpargeAttn kernels. Please install SpargeAttn from docs/INSTALLATION.md and restart WanGP before using FlashVSR.")
+        if flashvsr_mode_choice > 0:
+            flashvsr_requirement_message = flashvsr_sparse_attention_requirement_message()
+            if flashvsr_requirement_message is not None:
+                gr.Info(flashvsr_requirement_message)
         try:
             flashvsr_topk_ratio_choice = float(flashvsr_topk_ratio_choice or 0.0)
         except (TypeError, ValueError):

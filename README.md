@@ -41,7 +41,7 @@ With a slight (half year) delay WanGP supports now officially *FlashVSR* a very 
 
 The VRAM requirements above are independent of the Video Length (still the longer the video the more RAM)
 
-You first need to install *SpargeAttention* (please check the INSTALLATION.md for download links) and enable *FlashVSR* in the *Configuration > Exensions* Tab.
+You first need to install *triton* & *SpargeAttention* (please check the INSTALLATION.md for download links) and enable *FlashVSR* in the *Configuration > Exensions* Tab.
 
 FlashVSR is available in the following contexts:
 - a Postprocessing option in *Advanced Tab > Postprocessing*
