@@ -14,7 +14,7 @@ class FlashVSRBridge:
     TOPK_RATIO_DEFAULT = 0.0
     TOPK_RATIO_MAX = 4.0
     UPSAMPLING_VALUE_PREFIX = "flashvsr"
-    UPSAMPLING_RATIOS = (1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+    UPSAMPLING_RATIOS = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
 
     TRANSFORMER_FILENAME = "FlashVSR_v1.1_transformer_bf16.safetensors"
     LQ_PROJ_FILENAME = "FlashVSR_v1.1_lq_proj_bf16.safetensors"
