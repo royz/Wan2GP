@@ -15,7 +15,7 @@ from shared.utils.virtual_media import build_virtual_media_path
 class FlashVSRProcessHandler:
     system_handler = "flashvsr"
     model_type = "__system_flashvsr"
-    model_label = "System Edits"
+    model_label = "WanGP System Postprocessing"
     target_control_label = "Upsampling"
     target_control_choices = FlashVSRBridge.upsampling_choices(include_name=False)
     default_target_control = FlashVSRBridge.upsampling_value(2.0)

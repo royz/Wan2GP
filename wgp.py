@@ -124,7 +124,7 @@ AUTOSAVE_TEMPLATE_PATH = AUTOSAVE_FILENAME
 CONFIG_FILENAME = "wgp_config.json"
 PROMPT_VARS_MAX = 10
 target_mmgp_version = "3.7.6"
-WanGP_version = "11.52"
+WanGP_version = "11.60"
 settings_version = 2.58
 max_source_video_frames = 3000
 prompt_enhancer_image_caption_model, prompt_enhancer_image_caption_processor, prompt_enhancer_llm_model, prompt_enhancer_llm_tokenizer = None, None, None, None
@@ -2187,7 +2187,7 @@ MMAUDIO_PERSIST_RAM = 2
 MMAUDIO_STANDARD = "mmaudio_large_44k_v2.pth"
 MMAUDIO_ALTERNATE = "mmaudio_large_44k_gold_8.5k_final_fp16.safetensors"
 from postprocessing.flashvsr.wgp_bridge import FlashVSRBridge
-flashvsr = FlashVSRBridge(server_config, fl, lambda **kwargs: process_files_def(**kwargs), lambda: vae_config)
+flashvsr = FlashVSRBridge(server_config, fl)
 edit_mode_handlers = [flashvsr]
 
 
@@ -5117,7 +5117,8 @@ def perform_spatial_upsampling(sample, spatial_upsampling, seed=0, flashvsr_cont
         return (sample, None) if return_flashvsr_continue_cache else sample
     edit_upsampler = find_edit_spatial_upsampler(spatial_upsampling)
     if edit_upsampler is not None:
-        sample, flashvsr_cache = edit_upsampler.upscale(sample, spatial_upsampling, seed=seed, continue_cache=flashvsr_continue_cache, return_continue_cache=return_flashvsr_continue_cache, vae_tile_size=vae_tile_size, abort_callback=abort_callback, progress_callback=progress_callback)
+        profile = loaded_profile if loaded_profile >= 0 else get_default_profile("video")
+        sample, flashvsr_cache = edit_upsampler.upscale(sample, spatial_upsampling, seed=seed, continue_cache=flashvsr_continue_cache, return_continue_cache=return_flashvsr_continue_cache, vae_tile_size=vae_tile_size, process_files=process_files_def, vae_config=vae_config, init_pipe=init_pipe, profile=profile, abort_callback=abort_callback, progress_callback=progress_callback)
         return (sample, flashvsr_cache) if return_flashvsr_continue_cache else sample
     method = None
     if spatial_upsampling == "vae1":

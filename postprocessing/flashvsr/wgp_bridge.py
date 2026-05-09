@@ -6,13 +6,13 @@ from typing import Any, Callable
 
 class FlashVSRBridge:
     MODE_OFF = 0
-    MODE_TINY_LONG = 1
-    MODE_TINY = 2
-    MODE_FULL = 3
+    MODE_TINY = 1
+    MODE_FULL = 2
+    MODE_TINY_LONG = 3
     PERSIST_UNLOAD = 1
     PERSIST_RAM = 2
     TOPK_RATIO_DEFAULT = 0.0
-    TOPK_RATIO_MAX = 2.0
+    TOPK_RATIO_MAX = 4.0
     UPSAMPLING_VALUE_PREFIX = "flashvsr"
     UPSAMPLING_RATIOS = (1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
 
@@ -23,16 +23,14 @@ class FlashVSRBridge:
     VAE_FILENAME = "Wan2.1_VAE.safetensors"
 
     _VARIANTS = {
-        MODE_TINY_LONG: "tiny-long",
         MODE_TINY: "tiny",
         MODE_FULL: "full",
+        MODE_TINY_LONG: "tiny-long",
     }
 
-    def __init__(self, server_config: dict[str, Any], files_locator, process_files: Callable[..., Any], vae_config_getter: Callable[[], int]):
+    def __init__(self, server_config: dict[str, Any], files_locator):
         self.server_config = server_config
         self.files_locator = files_locator
-        self.process_files = process_files
-        self.vae_config_getter = vae_config_getter
 
     @classmethod
     def normalize_topk_ratio(cls, value: Any) -> float:
@@ -144,15 +142,15 @@ class FlashVSRBridge:
             vae=self.files_locator.locate_file(self.VAE_FILENAME) if variant == "full" else None,
         )
 
-    def vae_tile_size(self, output_height: int | None = None, output_width: int | None = None) -> int:
+    def vae_tile_size(self, vae_config: int, output_height: int | None = None, output_width: int | None = None) -> int:
         import torch
         from models.wan.modules.vae import WanVAE
 
         device_mem_capacity = torch.cuda.get_device_properties(0).total_memory / 1048576 if torch.cuda.is_available() else 0
         mixed_precision = self.server_config.get("vae_precision", "16") == "32"
-        return WanVAE.get_VAE_tile_size(self.vae_config_getter(), device_mem_capacity, mixed_precision, output_height=output_height, output_width=output_width)
+        return WanVAE.get_VAE_tile_size(vae_config, device_mem_capacity, mixed_precision, output_height=output_height, output_width=output_width)
 
-    def download(self) -> None:
+    def download(self, process_files: Callable[..., Any]) -> None:
         flashvsr_def = self.query_download_def()
         if flashvsr_def is None:
             return
@@ -161,20 +159,21 @@ class FlashVSRBridge:
         required.append(self.VAE_FILENAME if variant == "full" else os.path.join("FlashVSR", self.TCDECODER_FILENAME))
         if all(self.files_locator.locate_file(path, error_if_none=False) is not None for path in required):
             return
-        self.process_files(**flashvsr_def)
+        process_files(**flashvsr_def)
 
-    def upscale(self, sample, spatial_upsampling, *, seed=0, continue_cache=None, return_continue_cache=False, vae_tile_size=None, abort_callback=None, progress_callback=None):
+    def upscale(self, sample, spatial_upsampling, *, seed=0, continue_cache=None, return_continue_cache=False, vae_tile_size=None, process_files: Callable[..., Any], vae_config: int, init_pipe: Callable[..., int], profile, abort_callback=None, progress_callback=None):
         scale = self.scale_for_upsampling(spatial_upsampling)
         if scale is None:
             raise ValueError(f"Unknown FlashVSR upsampling mode: {spatial_upsampling}")
         enabled, variant, persistence = self.settings()
         if not enabled:
             raise RuntimeError("FlashVSR spatial upsampling is disabled in Configuration > Extensions.")
-        self.download()
+        self.download(process_files)
         from postprocessing.flashvsr.runtime import upscale_video
 
         output_height = int(sample.shape[-2] * scale)
         output_width = int(sample.shape[-1] * scale)
+        flashvsr_tile_size = self.vae_tile_size(vae_config, output_height, output_width)
         return upscale_video(
             sample,
             scale,
@@ -184,8 +183,10 @@ class FlashVSRBridge:
             continue_cache=continue_cache,
             return_continue_cache=return_continue_cache,
             persistent_models=persistence == self.PERSIST_RAM,
-            vae_tile_size=self.vae_tile_size(output_height, output_width) if vae_tile_size is None else vae_tile_size,
+            vae_tile_size=flashvsr_tile_size if variant == "full" or vae_tile_size is None else vae_tile_size,
             topk_ratio=self.topk_ratio(),
+            init_pipe=init_pipe,
+            profile=profile,
             abort_callback=abort_callback,
             progress_callback=progress_callback,
         )

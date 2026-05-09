@@ -33,6 +33,21 @@ WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, 
 
 
 ## 🔥 Latest Updates : 
+### 9th of May 2026: WanGP v11.60, The Last Mile
+
+With a slight (half year) delay WanGP supports now officially *FlashVSR* a very high quality *Spatial Upsampler* which can upsample up to 4x you videos. As FlashVSR has been almost entirely rewritten for WanGP, it can be branded as the *Ultimate Upsampler for the GPU Poor*, check these figures:
+- x2 Spatial Upsampling will need to work only 6GB of VRAM
+- x4 Spatial Upsampling will require only 10GB of VRAM (see the 5k example below)
+
+The VRAM requirements above are independent of the Video Length (still the longer the video the more RAM)
+
+You first need to install *SpargeAttention* (please check the INSTALLATION.md for download links) and enable *FlashVSR* in the *Configuration > Exensions* Tab.
+
+FlashVSR is available in the following contexts:
+- a Postprocessing option in *Advanced Tab > Postprocessing*
+- a *Late Postprocessing* that can be applied on already generated videos
+- in Model *WanGP System Postprocessing* of the *Process Full Video* Plugin you can Upsample a few hours long Video !
+
 ### 2nd of May 2026: WanGP v11.52, a Kind of Magic
 
 - **Vista 4D**: Vista4D allows a *Video Reshooting* of a *Dynamic scene* from novel camera trajectories and viewpoints. In other words this Wan 2.1 model will let you relive from a different (moving) perspective a scene with moving people or objects. The sequences are quite short (usually 49 frames, max around 97 frames) but it is a lot of fun as for once this really works. 

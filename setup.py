@@ -40,7 +40,7 @@ import sys
 import importlib
 import importlib.metadata
 
-pkgs = ['torch', 'triton', 'sageattention', 'flash_attn']
+pkgs = ['torch', 'triton', 'sageattention', 'spas_sage_attn', 'flash_attn']
 res = []
 try:
     res.append(f"python={sys.version.split()[0]}")
@@ -242,6 +242,10 @@ def run_cmd(cmd, env_vars=None):
 
     subprocess.run(cmd, shell=True, check=True, env=custom_env)
 
+def run_pip_component(pip, cmd):
+    if not cmd: return
+    run_cmd(cmd.format(pip=pip) if "{pip}" in cmd else f"{pip} {cmd}")
+
 def get_env_details(name, env_data):
     env_type = env_data["type"]
     dir_name = env_data["path"]
@@ -273,7 +277,7 @@ def show_status():
         print("="*90)
         return
 
-    print(f"{'NAME':<15} | {'TYPE':<5} | {'PYTHON':<8} | {'TORCH':<15} | {'TRITON':<9} | {'SAGE':<10} | {'FLASH':<10}")
+    print(f"{'NAME':<15} | {'TYPE':<5} | {'PYTHON':<8} | {'TORCH':<15} | {'TRITON':<9} | {'SAGE':<10} | {'SPARGE':<10} | {'FLASH':<10}")
     print("-" * 90)
 
     for name, data in envs.items():
@@ -290,13 +294,14 @@ def show_status():
               f"{details.get('torch','?'):<15} | "
               f"{details.get('triton','?'):<9} | "
               f"{details.get('sageattention','?'):<10} | "
+              f"{details.get('spas_sage_attn','?'):<10} | "
               f"{details.get('flash_attn','?'):<10}")
     
     print("-" * 90)
     print(f" * = Active Environment")
     print("="*90 + "\n")
 
-def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k, flash_k, kernel_list, config):
+def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k, sparge_k, flash_k, kernel_list, config):
     template = ENV_TEMPLATES[env_type]
     target_py_ver = config['components']['python'][py_k]['ver']
     
@@ -344,7 +349,11 @@ def install_logic(env_name, env_type, env_path, py_k, torch_k, triton_k, sage_k,
             elif env_type == "conda":
                 pass
 
-    if flash_k: 
+    if sparge_k:
+        cmd = resolve_cmd(config['components']['sparge'][sparge_k]['cmd'])
+        if cmd: run_pip_component(pip, cmd)
+
+    if flash_k:
         cmd = resolve_cmd(config['components']['flash'][flash_k]['cmd'])
         if cmd: run_cmd(f"{pip} {cmd}")
         
@@ -401,17 +410,18 @@ def do_install_interactive(env_type, config, detected_key):
         torch_k = menu("Torch Version", config['components']['torch'], base['torch'])
         triton_k = menu("Triton", config['components']['triton'], base['triton'])
         sage_k = menu("Sage Attention", config['components']['sage'], base['sage'])
+        sparge_k = menu("Sparge Attention", config['components']['sparge'], base.get('sparge'))
         flash_k = menu("Flash Attention", config['components']['flash'], base['flash'])
         kernels = base['kernels']
-        
-        install_logic(name, env_type, path, py_k, torch_k, triton_k, sage_k, flash_k, kernels, config)
-        
+
+        install_logic(name, env_type, path, py_k, torch_k, triton_k, sage_k, sparge_k, flash_k, kernels, config)
+
     elif mode == "3":
         p = config['gpu_profiles']['RTX_50']
-        install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('flash'), p['kernels'], config)
+        install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
     else:
         p = config['gpu_profiles'][detected_key]
-        install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('flash'), p['kernels'], config)
+        install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
 
     manager.add_env(name, env_type, path)
     
@@ -440,7 +450,7 @@ def do_install_auto(env_type, config, detected_key):
     print(f"\n[*] Starting Automatic Install (Hardware Profile: {detected_key})...")
     p = config['gpu_profiles'][detected_key]
     
-    install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('flash'), p['kernels'], config)
+    install_logic(name, env_type, path, p['python'], p['torch'], p['triton'], p['sage'], p.get('sparge'), p.get('flash'), p['kernels'], config)
 
     manager.add_env(name, env_type, path)
     manager.set_active(name)
@@ -580,9 +590,10 @@ def do_upgrade(config):
     torch_k = menu("Torch Version", config['components']['torch'], rec['torch'])
     triton_k = menu("Triton", config['components']['triton'], rec['triton'])
     sage_k = menu("Sage Attention", config['components']['sage'], rec['sage'])
+    sparge_k = menu("Sparge Attention", config['components']['sparge'], rec.get('sparge'))
     flash_k = menu("Flash Attention", config['components']['flash'], rec['flash'])
 
-    install_logic(env_name, env_data['type'], env_data['path'], py_k, torch_k, triton_k, sage_k, flash_k, rec['kernels'], config)
+    install_logic(env_name, env_data['type'], env_data['path'], py_k, torch_k, triton_k, sage_k, sparge_k, flash_k, rec['kernels'], config)
 
 def get_system_specs():
     ram_gb = 0

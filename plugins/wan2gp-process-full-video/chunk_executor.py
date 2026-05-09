@@ -233,6 +233,7 @@ class ChunkExecutor:
                 if returned_frame_count < write_end:
                     raise gr.Error(f"Chunk {chunk_index} returned {returned_frame_count} frame(s), but {write_end} frame(s) were required.")
 
+                source_audio_duration_seconds = float(frames.count_planned_unique_frames(context.plans)) / float(context.fps_float) if context.use_live_av_mux else None
                 progress.write_state.ensure_started(
                     server_config=self.plugin.server_config,
                     ffmpeg_path=context.ffmpeg_path,
@@ -245,6 +246,7 @@ class ChunkExecutor:
                     resolved_width=progress.resolved_width,
                     resolved_height=progress.resolved_height,
                     fps_float=context.fps_float,
+                    source_audio_duration_seconds=source_audio_duration_seconds,
                 )
                 if context.continued_mode and progress.write_state.output_path_for_write != context.output_path and callable(getattr(context.system_handler, "move_continue_cache", None)):
                     context.system_handler.move_continue_cache(context.output_path, progress.write_state.output_path_for_write)
@@ -380,6 +382,7 @@ class ChunkExecutor:
                 raise gr.Error(f"Chunk {chunk_index} returned {writable_frame_count} writable frame(s), but {expected_unique_frames} frame(s) were required.")
             frames_to_write = expected_unique_frames
 
+            source_audio_duration_seconds = float(frames.count_planned_unique_frames(context.plans)) / float(context.fps_float) if context.use_live_av_mux else None
             progress.write_state.ensure_started(
                 server_config=self.plugin.server_config,
                 ffmpeg_path=context.ffmpeg_path,
@@ -392,6 +395,7 @@ class ChunkExecutor:
                 resolved_width=progress.resolved_width,
                 resolved_height=progress.resolved_height,
                 fps_float=context.fps_float,
+                source_audio_duration_seconds=source_audio_duration_seconds,
             )
             last_frame_tensor = progress.write_state.write_chunk(process_is_hdr=context.process_is_hdr, video_tensor_hdr=video_tensor_hdr, video_tensor_uint8=video_tensor_uint8, start_frame=skip_frames, frame_count=frames_to_write)
             progress.written_unique_frames += frames_to_write

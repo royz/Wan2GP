@@ -23,6 +23,14 @@ from shared.deepy.config import (
     set_deepy_runtime_config,
 )
 
+def flashvsr_sparge_attention_available():
+    try:
+        from postprocessing.flashvsr.attention_backend import sparge_attention_available
+        return sparge_attention_available()
+    except Exception:
+        return False
+
+
 class ConfigTabPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
@@ -258,7 +266,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
                         label="MMAudio Model Persistence"
                     )
                     self.flashvsr_mode_choice = gr.Dropdown(
-                        choices=[("Off", 0), ("FlashVSR v1.1 Tiny Long", 1), ("FlashVSR v1.1 Tiny", 2), ("FlashVSR v1.1 Full", 3)],
+                        choices=[("Off", 0), ("FlashVSR v1.1 Tiny (Slightly Lower Quality, Faster VAE Decoding, Needs Less RAM)", 1), ("FlashVSR v1.1 Full (Best Quality, Slower VAE Decoding, Needs More RAM)", 2)], # ("FlashVSR v1.1 Tiny Long", 3)],
                         value=self.server_config.get("flashvsr_mode", 0),
                         label="FlashVSR Spatial Upsampling (It requires the SpargeAttn kernels to be installed)"
                     )
@@ -269,7 +277,7 @@ class ConfigTabPlugin(WAN2GPPlugin):
                     )
                     self.flashvsr_topk_ratio_choice = gr.Slider(
                         0.0,
-                        2.0,
+                        4.0,
                         value=self.server_config.get("flashvsr_topk_ratio", 0.0),
                         step=0.05,
                         label="FlashVSR Quality / Sparse Top-K Ratio (0 = Auto)",
@@ -557,11 +565,13 @@ class ConfigTabPlugin(WAN2GPPlugin):
 
         flashvsr_mode_choice = int(flashvsr_mode_choice or 0)
         flashvsr_persistence_choice = int(flashvsr_persistence_choice or 1)
+        if flashvsr_mode_choice > 0 and not flashvsr_sparge_attention_available():
+            gr.Info("FlashVSR requires SpargeAttn kernels. Please install SpargeAttn from docs/INSTALLATION.md and restart WanGP before using FlashVSR.")
         try:
             flashvsr_topk_ratio_choice = float(flashvsr_topk_ratio_choice or 0.0)
         except (TypeError, ValueError):
             flashvsr_topk_ratio_choice = 0.0
-        flashvsr_topk_ratio_choice = max(0.0, min(2.0, flashvsr_topk_ratio_choice))
+        flashvsr_topk_ratio_choice = max(0.0, min(4.0, flashvsr_topk_ratio_choice))
         mmaudio_enabled_choice = 0 if mmaudio_mode_choice == 0 else mmaudio_persistence_choice
 
         new_server_config = dict(old_server_config)

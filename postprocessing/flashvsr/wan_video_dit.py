@@ -106,7 +106,7 @@ class WindowPartition3D:
         assert F % wf == 0 and H % wh == 0 and W % ww == 0, "Dims must divide by window size."
         x = x.view(B, F // wf, wf, H // wh, wh, W // ww, ww, C)
         x = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous()
-        return x.view(-1, wf * wh * ww, C)
+        return x.reshape(-1, wf * wh * ww, C)
 
     @staticmethod
     def reverse(windows: torch.Tensor | list[torch.Tensor], win: Tuple[int, int, int], orig: Tuple[int, int, int]):
@@ -120,7 +120,18 @@ class WindowPartition3D:
         B = windows.size(0) // (nf * nh * nw)
         x = windows.view(B, nf, nh, nw, wf, wh, ww, -1)
         x = x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous()
-        return x.view(B, F, H, W, -1)
+        return x.reshape(B, F, H, W, -1)
+
+
+@torch.no_grad()
+def _topk_threshold_mask(flat: torch.Tensor, apply_topk: int) -> torch.Tensor:
+    if apply_topk <= 0:
+        return torch.zeros_like(flat, dtype=torch.bool)
+    threshold_index = flat.shape[1] - apply_topk
+    thresholds = flat.kthvalue(threshold_index, dim=1).values.unsqueeze_(1)
+    mask = flat > thresholds
+    del thresholds
+    return mask
 
 
 @torch.no_grad()
@@ -142,29 +153,23 @@ def generate_draft_block_mask(batch_size, nheads, seqlen,
     scores.mul_(1 / math.sqrt(D))
 
     repeat_head = scores.shape[0]
-    repeat_len = scores.shape[1] // local_attn_mask.shape[0]
-    repeat_num = scores.shape[2] // local_attn_mask.shape[1]
-    local_attn_mask = local_attn_mask.unsqueeze(1).unsqueeze(0).repeat(repeat_len, 1, repeat_num, 1)
-    local_attn_mask = rearrange(local_attn_mask, 'x a y b -> (x a) (y b)')
-    local_attn_mask = local_attn_mask.unsqueeze(0).repeat(repeat_head, 1, 1)
-    scores.masked_fill_(local_attn_mask.logical_not_(), -float('inf'))
-    del local_attn_mask
+    local_h, local_w = local_attn_mask.shape
+    repeat_len = scores.shape[1] // local_h
+    repeat_num = scores.shape[2] // local_w
+    scores = scores.reshape(repeat_head, repeat_len, local_h, repeat_num, local_w)
+    scores.masked_fill_(~local_attn_mask.view(1, 1, local_h, 1, local_w), -float('inf'))
+    scores = scores.reshape(repeat_head, repeat_len * local_h, repeat_num * local_w)
 
     attn_map = torch.softmax(scores, dim=-1)
     del scores
     attn_map = rearrange(attn_map, 'h (it s1) s2 -> (h it) s1 s2', it=seqlen)
     loop_num, s1, s2 = attn_map.shape
     flat = attn_map.reshape(loop_num, -1)
-    n = flat.shape[1]
     apply_topk = min(flat.shape[1]-1, topk)
-    thresholds = torch.topk(flat, k=apply_topk + 1, dim=1, largest=True).values[:, -1]
-    thresholds = thresholds.unsqueeze(1)
-    mask_new = (flat > thresholds).reshape(loop_num, s1, s2)
-    mask_new = rearrange(mask_new, '(h it) s1 s2 -> h (it s1) s2', it=seqlen)  # keep shape note
-    # 修正：上行变量名统一
-    # mask_new = rearrange(attn_map, 'h (it s1) s2 -> h (it s1) s2', it=seqlen) * 0 + mask_new
-    mask = mask_new.unsqueeze(0).repeat(batch_size, 1, 1, 1)
-    return mask
+    mask_new = _topk_threshold_mask(flat, apply_topk)
+    del flat, attn_map
+    mask_new = mask_new.reshape(nheads, seqlen * s1, s2)
+    return mask_new.unsqueeze(0)
 
 
 @torch.no_grad()
@@ -197,19 +202,12 @@ def generate_draft_block_mask_sage(batch_size, nheads, seqlen,
     del scores_1, scores_2
 
     repeat_head = scores.shape[0]
-    repeat_len = scores.shape[1] // local_attn_mask.shape[0]
-    repeat_num = (scores.shape[2] // 2) // local_attn_mask.shape[1]
-    
-    local_attn_mask = local_attn_mask.unsqueeze(1).unsqueeze(0).repeat(repeat_len, 1, repeat_num, 1)
-    local_attn_mask = rearrange(local_attn_mask, 'x a y b -> (x a) (y b)')
-    local_attn_mask = local_attn_mask.repeat_interleave(2, dim=1)
-    local_attn_mask = local_attn_mask.unsqueeze(0).repeat(repeat_head, 1, 1)
-    
-    assert scores.shape == local_attn_mask.shape, \
-        f"Scores shape {scores.shape} != Mask shape {local_attn_mask.shape}"
-    
-    scores.masked_fill_(local_attn_mask.logical_not_(), -float('inf'))
-    del local_attn_mask
+    local_h, local_w = local_attn_mask.shape
+    repeat_len = scores.shape[1] // local_h
+    repeat_num = (scores.shape[2] // 2) // local_w
+    scores = scores.reshape(repeat_head, repeat_len, local_h, repeat_num, local_w, 2)
+    scores.masked_fill_(~local_attn_mask.view(1, 1, local_h, 1, local_w, 1), -float('inf'))
+    scores = scores.reshape(repeat_head, repeat_len * local_h, repeat_num * local_w * 2)
 
     attn_map = torch.softmax(scores, dim=-1)
     del scores
@@ -217,25 +215,26 @@ def generate_draft_block_mask_sage(batch_size, nheads, seqlen,
     loop_num, s1, s2 = attn_map.shape
     flat = attn_map.reshape(loop_num, -1)
     apply_topk = min(flat.shape[1]-1, topk)
-    
-    if apply_topk <= 0:
-        mask_new = torch.zeros_like(flat, dtype=torch.bool).reshape(loop_num, s1, s2)
-    else:
-        thresholds = torch.topk(flat, k=apply_topk + 1, dim=1, largest=True).values[:, -1]
-        thresholds = thresholds.unsqueeze(1)
-        mask_new = (flat > thresholds).reshape(loop_num, s1, s2)
-        
-    mask_new = rearrange(mask_new, '(h it) s1 s2 -> h (it s1) s2', it=seqlen)
-    mask = mask_new.unsqueeze(0).repeat(batch_size, 1, 1, 1)
-    return mask
+
+    mask_new = _topk_threshold_mask(flat, apply_topk)
+    del flat, attn_map
+    mask_new = mask_new.reshape(loop_num, s1, s2)
+    mask_new = mask_new.reshape(nheads, seqlen * s1, s2)
+    mask_new = mask_new.to(torch.int8)
+    return mask_new.unsqueeze(0)
 
 
 # ----------------------------
 # Attention kernels
 # ----------------------------
-def flash_attention(qkv_list: list[torch.Tensor], num_heads: int, compatibility_mode=False, attention_mask=None, return_KV=False):
+def flash_attention(qkv_list: list[torch.Tensor], num_heads: int, compatibility_mode=False, attention_mask_list=None, return_KV=False):
     q, k, v = qkv_list
     qkv_list.clear()
+    if isinstance(attention_mask_list, list):
+        attention_mask = attention_mask_list[0]
+        attention_mask_list.clear()
+    else:
+        attention_mask = None
     if attention_mask is not None:
         seqlen = q.shape[1]
         seqlen_kv = k.shape[1]
@@ -247,21 +246,20 @@ def flash_attention(qkv_list: list[torch.Tensor], num_heads: int, compatibility_
             q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
             k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
             v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-        cu_seqlens_q = torch.tensor([0, seqlen], device=q.device, dtype=torch.int32)
-        cu_seqlens_k = torch.tensor([0, seqlen_kv], device=q.device, dtype=torch.int32)
-        head_mask_type = torch.tensor([1]*num_heads, device=q.device, dtype=torch.int32)
-        streaming_info = None
-        base_blockmask = attention_mask
         max_seqlen_q_ = seqlen
         max_seqlen_k_ = seqlen_kv
         p_dropout = 0.0
         if USE_BLOCK_ATTN and BLOCK_ATTN_AVAILABLE:
+            cu_seqlens_q = torch.tensor([0, seqlen], device=q.device, dtype=torch.int32)
+            cu_seqlens_k = torch.tensor([0, seqlen_kv], device=q.device, dtype=torch.int32)
+            head_mask_type = torch.tensor([1]*num_heads, device=q.device, dtype=torch.int32)
+            streaming_info = None
             x = block_sparse_attn_func(
                 q, k, v,
                 cu_seqlens_q, cu_seqlens_k,
                 head_mask_type,
                 streaming_info,
-                base_blockmask,
+                attention_mask,
                 max_seqlen_q_, max_seqlen_k_,
                 p_dropout,
                 deterministic=False,
@@ -272,14 +270,18 @@ def flash_attention(qkv_list: list[torch.Tensor], num_heads: int, compatibility_
             ).unsqueeze(0)
             x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
         else:
-            x = sparse_attention([q, k, v], base_blockmask)
-            q = k = v = None
+            qkv_list = [q, k, v]
+            mask_list = [attention_mask]
+            del q, k, v, attention_mask
+            x = sparse_attention(qkv_list, mask_list, recycle_q=True)
             x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
     else:
         q = rearrange(q, "b s (n d) -> b s n d", n=num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=num_heads)
-        x = pay_attention([q, k, v], force_attention="sdpa" if compatibility_mode else get_flashvsr_attention_mode(), recycle_q=True)
+        qkv_list = [q, k, v]
+        del q, k, v
+        x = pay_attention(qkv_list, force_attention="sdpa" if compatibility_mode else get_flashvsr_attention_mode(), recycle_q=True)
         x = rearrange(x, "b s n d -> b s (n d)", n=num_heads)
     return x
 
@@ -333,21 +335,35 @@ def rope_apply(x_list, freqs, num_heads, f: int, h: int, w: int):
     return x.reshape(b, f * h * w, -1)
 
 
+def rope_apply_windowed(x_list, freqs, num_heads, f: int, h: int, w: int, win: Tuple[int, int, int], batch_size: int):
+    x = x_list[0]
+    x_list.clear()
+    wf, wh, ww = win
+    nf, nh, nw = f // wf, h // wh, w // ww
+    x = x.view(batch_size, nf, nh, nw, wf, wh, ww, num_heads, -1)
+    f_freqs, h_freqs, w_freqs = freqs
+    f_dim = f_freqs[0].shape[-1] * 2
+    h_dim = h_freqs[0].shape[-1] * 2
+    _rope_axis_inplace(x[..., :f_dim], f_freqs[0].view(nf, wf, -1).view(1, nf, 1, 1, wf, 1, 1, 1, -1), f_freqs[1].view(nf, wf, -1).view(1, nf, 1, 1, wf, 1, 1, 1, -1))
+    _rope_axis_inplace(x[..., f_dim:f_dim + h_dim], h_freqs[0].view(nh, wh, -1).view(1, 1, nh, 1, 1, wh, 1, 1, -1), h_freqs[1].view(nh, wh, -1).view(1, 1, nh, 1, 1, wh, 1, 1, -1))
+    _rope_axis_inplace(x[..., f_dim + h_dim:], w_freqs[0].view(nw, ww, -1).view(1, 1, 1, nw, 1, 1, ww, 1, -1), w_freqs[1].view(nw, ww, -1).view(1, 1, 1, nw, 1, 1, ww, 1, -1))
+    return x.view(batch_size * nf * nh * nw, wf * wh * ww, -1)
+
+
 # ----------------------------
 # Norms & Blocks
 # ----------------------------
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
-        dtype = x.dtype
-        return self.norm(x.float()).to(dtype).mul_(self.weight)
+def rms_norm_inplace(x: torch.Tensor | list[torch.Tensor], norm: nn.RMSNorm) -> torch.Tensor:
+    if isinstance(x, list):
+        x_list = x
+        x = x_list[0]
+        x_list.clear()
+    inv_rms = torch.linalg.vector_norm(x, ord=2, dim=-1, keepdim=True, dtype=torch.float32)
+    inv_rms.pow_(2).div_(x.shape[-1]).add_(norm.eps).rsqrt_()
+    x.mul_(inv_rms.to(dtype=x.dtype))
+    weight = norm.weight if norm.weight.dtype == x.dtype else norm.weight.to(dtype=x.dtype)
+    x.mul_(weight)
+    return x
 
 
 class AttentionModule(nn.Module):
@@ -355,8 +371,8 @@ class AttentionModule(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         
-    def forward(self, qkv_list, attention_mask=None):
-        x = flash_attention(qkv_list, num_heads=self.num_heads, attention_mask=attention_mask)
+    def forward(self, qkv_list, attention_mask_list=None):
+        x = flash_attention(qkv_list, num_heads=self.num_heads, attention_mask_list=attention_mask_list)
         return x
 
 
@@ -371,8 +387,8 @@ class SelfAttention(nn.Module):
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
-        self.norm_q = RMSNorm(dim, eps=eps)
-        self.norm_k = RMSNorm(dim, eps=eps)
+        self.norm_q = nn.RMSNorm(dim, eps=eps)
+        self.norm_k = nn.RMSNorm(dim, eps=eps)
         
         self.attn = AttentionModule(self.num_heads)
         self.local_attn_mask = None
@@ -393,28 +409,24 @@ class SelfAttention(nn.Module):
             assert f==6, " start f must be 6"
         assert L == f * h * w, "Sequence length mismatch with provided (f,h,w)."
 
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(x))
-        v = self.v(x)
-        del x
-        q_list = [q]
-        q = None
-        q = rope_apply(q_list, freqs, self.num_heads, f, h, w)
-        k_list = [k]
-        k = None
-        k = rope_apply(k_list, freqs, self.num_heads, f, h, w)
-
         win = (2, 8, 8)
-        q = q.view(B, f, h, w, D)
-        k = k.view(B, f, h, w, D)
-        v = v.view(B, f, h, w, D)
+        x_w = WindowPartition3D.partition([x.view(B, f, h, w, D)], win)
+        x = None
 
-        q_w = WindowPartition3D.partition([q], win)
-        q = None
-        k_w = WindowPartition3D.partition([k], win)
-        k = None
-        v_w = WindowPartition3D.partition([v], win)
-        v = None
+        v_w = self.v(x_w)
+
+        q_w = self.q(x_w)        
+        q_w = rms_norm_inplace(q_w, self.norm_q)
+        q_list = [q_w]
+        q_w = None
+        q_w = rope_apply_windowed(q_list, freqs, self.num_heads, f, h, w, win, B)
+
+        k_w = self.k(x_w)        
+        del x_w
+        k_w = rms_norm_inplace(k_w, self.norm_k)
+        k_list = [k_w]
+        k_w = None
+        k_w = rope_apply_windowed(k_list, freqs, self.num_heads, f, h, w, win, B)
 
         seqlen = f//win[0]
         one_len = k_w.shape[0] // B // seqlen
@@ -431,9 +443,19 @@ class SelfAttention(nn.Module):
         block_s = q_w.shape[1]
         block_n_kv = k_w.shape[0] // B
 
+        cache_k = cache_v = None
+        if is_stream and cache_next:
+            cache_blocks = min(block_n_kv, one_len * max(1, int(kv_len)))
+            cache_k = k_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
+            cache_k = cache_k.detach().to("cpu")
+            cache_v = v_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
+            cache_v = cache_v.detach().to("cpu")
+
         reorder_q = rearrange(q_w, '(b block_n) (block_s) d -> b (block_n block_s) d', block_n=block_n, block_s=block_s)
         reorder_k = rearrange(k_w, '(b block_n) (block_s) d -> b (block_n block_s) d', block_n=block_n_kv, block_s=block_s)
         reorder_v = rearrange(v_w, '(b block_n) (block_s) d -> b (block_n block_s) d', block_n=block_n_kv, block_s=block_s)
+
+        del v_w
 
         window_size = win[0]*h*w//128
 
@@ -443,25 +465,17 @@ class SelfAttention(nn.Module):
             self.local_attn_mask_w = w//8
             self.local_range = local_range
         if USE_BLOCK_ATTN and BLOCK_ATTN_AVAILABLE:
-            attention_mask = generate_draft_block_mask(B, self.num_heads, seqlen, [q_w, k_w], topk=topk, local_attn_mask=self.local_attn_mask)
-            q_w = None
+            qk_list = [q_w, k_w]
+            q_w = k_w = None
+            attention_mask = generate_draft_block_mask(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask)
         else:
-            attention_mask = generate_draft_block_mask_sage(B, self.num_heads, seqlen, [q_w, k_w], topk=topk, local_attn_mask=self.local_attn_mask)
-            q_w = None
-
-        x = self.attn([reorder_q, reorder_k, reorder_v], attention_mask)
-        reorder_q = reorder_k = reorder_v = None
-        del attention_mask
-
-        cache_k = cache_v = None
-        if is_stream and cache_next:
-            cache_blocks = min(block_n_kv, one_len * max(1, int(kv_len)))
-            cache_k = k_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
-            cache_v = v_w.view(B, block_n_kv, block_s, D)[:, -cache_blocks:].reshape(B * cache_blocks, block_s, D)
-            cache_k = cache_k.detach().to("cpu")
-            cache_v = cache_v.detach().to("cpu")
-        if is_stream:
-            del k_w, v_w
+            qk_list = [q_w, k_w]
+            q_w = k_w = None
+            attention_mask = generate_draft_block_mask_sage(B, self.num_heads, seqlen, qk_list, topk=topk, local_attn_mask=self.local_attn_mask)
+        qkv_list = [reorder_q, reorder_k, reorder_v]
+        attention_mask_list = [attention_mask]
+        del reorder_q, reorder_k, reorder_v, attention_mask
+        x = self.attn(qkv_list, attention_mask_list)
 
         x = rearrange(x, 'b (block_n block_s) d -> (b block_n) (block_s) d', block_n=block_n, block_s=block_s)
         x = WindowPartition3D.reverse([x], win, (f, h, w))
@@ -487,8 +501,8 @@ class CrossAttention(nn.Module):
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
 
-        self.norm_q = RMSNorm(dim, eps=eps)
-        self.norm_k = RMSNorm(dim, eps=eps)
+        self.norm_q = nn.RMSNorm(dim, eps=eps)
+        self.norm_k = nn.RMSNorm(dim, eps=eps)
 
         self.attn = AttentionModule(self.num_heads)
 
@@ -499,7 +513,7 @@ class CrossAttention(nn.Module):
     @torch.no_grad()
     def init_cache(self, ctx: torch.Tensor):
         """ctx: [B, S_ctx, dim] —— 经过 text_embedding 之后的上下文"""
-        self.cache_k = self.norm_k(self.k(ctx))
+        self.cache_k = rms_norm_inplace([self.k(ctx)], self.norm_k)
         self.cache_v = self.v(ctx)
 
     def clear_cache(self):
@@ -514,7 +528,7 @@ class CrossAttention(nn.Module):
             x_ref = x
             x = x_ref[0]
             x_ref.clear()
-        q = self.norm_q(self.q(x))
+        q = rms_norm_inplace([self.q(x)], self.norm_q)
         del x
         assert self.cache_k is not None and self.cache_v is not None
         k = self.cache_k

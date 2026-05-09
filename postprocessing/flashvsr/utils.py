@@ -12,6 +12,18 @@ import numpy as np
 
 CACHE_T = 2
 
+def _cache_tail_cpu(x):
+    return x[:, :, -CACHE_T:, :, :].detach().to(device="cpu", copy=True)
+
+
+def _linear_outputs_cpu(linear_layers, x):
+    outputs = []
+    for layer in linear_layers:
+        y = layer(x)
+        outputs.append(y.detach().to("cpu"))
+        del y
+    return outputs
+
 @contextmanager
 def init_weights_on_device(device = torch.device("meta"), include_buffers :bool = False):
     
@@ -239,13 +251,19 @@ class CausalConv3d(nn.Conv3d):
                          self.padding[1], 2 * self.padding[0], 0)
         self.padding = (0, 0, 0)
         
-    def forward(self, x, cache_x=None):
+    def forward(self, x_list, cache_x=None):
+        x = x_list[0]
+        x_list.clear()
         padding = list(self._padding)
         if cache_x is not None and self._padding[4] > 0:
-            cache_x = cache_x.to(x.device)
             # print(cache_x.shape, x.shape)
-            x = torch.cat([cache_x, x], dim=2)
-            padding[4] -= cache_x.shape[2]
+            cache_t = cache_x.shape[2]
+            old_x = x
+            x = old_x.new_empty(*old_x.shape[:2], cache_t + old_x.shape[2], *old_x.shape[3:])
+            x[:, :, :cache_t, :, :].copy_(cache_x, non_blocking=True)
+            x[:, :, cache_t:, :, :].copy_(old_x)
+            del cache_x, old_x
+            padding[4] -= cache_t
             # print('cache!')
         x = F.pad(x, padding, mode='replicate') # mode='replicate'
         # print(x[0,0,:,0,0])
@@ -296,19 +314,19 @@ class Buffer_LQ4x_Proj(nn.Module):
         
         t = video.shape[2]
         iter_ = 1 + (t - 1) // 4
-        first_frame = video[:, :, :1, :, :].repeat(1, 1, 3, 1, 1)
+        first_frame = video[:, :, :1, :, :].expand(-1, -1, 3, -1, -1)
         video = torch.cat([first_frame, video], dim=2)
         # print(video.shape)
         
         out_x = []
         for i in range(iter_):
             x = self.pixel_shuffle(video[:,:,i*4:(i+1)*4,:,:])
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache1_x = _cache_tail_cpu(x)
             self.cache['conv1'] = cache1_x
             x = self.conv1(x, self.cache['conv1'])
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache2_x = _cache_tail_cpu(x)
             self.cache['conv2'] = cache2_x
             if i == 0:
                 continue
@@ -333,34 +351,34 @@ class Buffer_LQ4x_Proj(nn.Module):
     def stream_forward(self, video_clip):
         if self.clip_idx == 0:
             # self.clear_cache()
-            first_frame = video_clip[:, :, :1, :, :].repeat(1, 1, 3, 1, 1)
+            first_frame = video_clip[:, :, :1, :, :].expand(-1, -1, 3, -1, -1)
             video_clip = torch.cat([first_frame, video_clip], dim=2)
             x = self.pixel_shuffle(video_clip)
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache1_x = _cache_tail_cpu(x)
             self.cache['conv1'] = cache1_x
             x = self.conv1(x, self.cache['conv1'])
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache2_x = _cache_tail_cpu(x)
             self.cache['conv2'] = cache2_x
             self.clip_idx += 1
             return None
         else:
             x = self.pixel_shuffle(video_clip)
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache1_x = _cache_tail_cpu(x)
             self.cache['conv1'] = cache1_x
             x = self.conv1(x, self.cache['conv1'])
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache2_x = _cache_tail_cpu(x)
             self.cache['conv2'] = cache2_x
             x = self.conv2(x, self.cache['conv2'])
             x = self.norm2(x)
             x = self.act2(x)
             out_x = rearrange(x, 'b c f h w -> b (f h w) c')
-            outputs = []
-            for i in range(self.layer_num):
-                outputs.append(self.linear_layers[i](out_x))
+            del x
+            outputs = _linear_outputs_cpu(self.linear_layers, out_x)
+            del out_x
             self.clip_idx += 1
             return outputs
 
@@ -395,19 +413,19 @@ class Causal_LQ4x_Proj(nn.Module):
         
         t = video.shape[2]
         iter_ = 1 + (t - 1) // 4
-        first_frame = video[:, :, :1, :, :].repeat(1, 1, 3, 1, 1)
+        first_frame = video[:, :, :1, :, :].expand(-1, -1, 3, -1, -1)
         video = torch.cat([first_frame, video], dim=2)
         # print(video.shape)
         
         out_x = []
         for i in range(iter_):
             x = self.pixel_shuffle(video[:,:,i*4:(i+1)*4,:,:])
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache1_x = _cache_tail_cpu(x)
             x = self.conv1(x, self.cache['conv1'])
             self.cache['conv1'] = cache1_x
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache2_x = _cache_tail_cpu(x)
             if i == 0:
                 self.cache['conv2'] = cache2_x
                 continue
@@ -442,37 +460,48 @@ class Causal_LQ4x_Proj(nn.Module):
                 del self.cache['conv2']
                 self.cache['conv2'] = None
         
-    def stream_forward(self, video_clip):
+    def stream_forward(self, video_clip_list):
+        video_clip = video_clip_list[0]
+        video_clip_list.clear()
         if self.clip_idx == 0:
             # self.clear_cache()
-            first_frame = video_clip[:, :, :1, :, :].repeat(1, 1, 3, 1, 1)
+            first_frame = video_clip[:, :, :1, :, :].expand(-1, -1, 3, -1, -1)
             video_clip = torch.cat([first_frame, video_clip], dim=2)
+            del first_frame
             x = self.pixel_shuffle(video_clip)
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
-            x = self.conv1(x, self.cache['conv1'])
+            del video_clip
+            cache1_x = _cache_tail_cpu(x)
+            x_list = [x]
+            del x
+            x = self.conv1(x_list, self.cache['conv1'])
             self.cache['conv1'] = cache1_x
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
+            cache2_x = _cache_tail_cpu(x)
             self.cache['conv2'] = cache2_x
             self.clip_idx += 1
             return None
         else:
             x = self.pixel_shuffle(video_clip)
-            cache1_x = x[:, :, -CACHE_T:, :, :].clone()
-            x = self.conv1(x, self.cache['conv1'])
+            del video_clip
+            cache1_x = _cache_tail_cpu(x)
+            x_list = [x]
+            del x
+            x = self.conv1(x_list, self.cache['conv1'])
             self.cache['conv1'] = cache1_x
             x = self.norm1(x)
             x = self.act1(x)
-            cache2_x = x[:, :, -CACHE_T:, :, :].clone()
-            x = self.conv2(x, self.cache['conv2'])
+            cache2_x = _cache_tail_cpu(x)
+            x_list = [x]
+            del x
+            x = self.conv2(x_list, self.cache['conv2'])
             self.cache['conv2'] = cache2_x
             x = self.norm2(x)
             x = self.act2(x)
             out_x = rearrange(x, 'b c f h w -> b (f h w) c')
-            outputs = []
-            for i in range(self.layer_num):
-                outputs.append(self.linear_layers[i](out_x))
+            del x
+            outputs = _linear_outputs_cpu(self.linear_layers, out_x)
+            del out_x
             self.clip_idx += 1
             return outputs
 

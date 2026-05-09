@@ -584,9 +584,9 @@ class ProcessRunner:
             if actual_output_frames < total_written_unique_frames:
                 if write_state.stopped:
                     common.plugin_info(f"Stopped output contains {actual_output_frames} readable frame(s), lower than the {total_written_unique_frames} frame(s) attempted. Recording the probed frame count.")
+                    total_written_unique_frames = actual_output_frames
                 else:
-                    common.plugin_info(f"Final output contains {actual_output_frames} readable frame(s), lower than the {total_written_unique_frames} frame(s) written. Recording the probed frame count.")
-                total_written_unique_frames = actual_output_frames
+                    raise gr.Error(f"Final output contains {actual_output_frames} readable frame(s), but {total_written_unique_frames} frame(s) were written.")
             total_generation_time = existing_output_generation_time + process_metadata.read_metadata_generation_time(metadata_source_path) if merged_continuation else process_metadata.read_metadata_generation_time(metadata_source_path)
             output_process_metadata = {
                 "process": process_display_name,
