@@ -70,7 +70,7 @@ def _print_auto_fallback(message: str) -> None:
     if message in _PRINTED_AUTO_FALLBACKS:
         return
     _PRINTED_AUTO_FALLBACKS.add(message)
-    print(f"[FlashVSR] Auto backend cannot use {_BACKEND_LABELS[_SPARGE_BACKEND]}: {message}")
+    print(f"[FlashVSR] Auto backend cannot use {_BACKEND_LABELS[_SPARGE_BACKEND]}: {message} Install SpargeAttn for better FlashVSR quality.")
     print(f"[FlashVSR] Auto backend trying {_BACKEND_LABELS[_TRITON_SPARSE_BACKEND]}.")
 
 
