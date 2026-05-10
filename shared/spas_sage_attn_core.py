@@ -14,25 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import importlib
+
 import torch
 from spas_sage_attn.utils import hyperparameter_check, get_block_map_meansim_fuse_quant, get_vanilla_qk_quant, block_map_lut_triton
 from spas_sage_attn.triton_kernel_example import spas_sage_attn_meansim as spas_sage_attn_meansim_triton
 from einops import rearrange
 
+
+def _load_qattn_kernel(compile_module, direct_module, attr_name, op_namespace):
+    try:
+        return getattr(importlib.import_module(compile_module), attr_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != compile_module:
+            raise
+        importlib.import_module(direct_module)
+        return getattr(torch.ops, op_namespace)
+
+
 try:
-    from spas_sage_attn.sm80_compile import _qattn_sm80
+    _qattn_sm80 = _load_qattn_kernel("spas_sage_attn.sm80_compile", "spas_sage_attn._qattn_sm80", "_qattn_sm80", "spas_sage_attn_qattn_sm80")
     SM80_ENABLED = True
 except:
     SM80_ENABLED = False
 
 try:
-    from spas_sage_attn.sm89_compile import _qattn_sm89
+    _qattn_sm89 = _load_qattn_kernel("spas_sage_attn.sm89_compile", "spas_sage_attn._qattn_sm89", "_qattn_sm89", "spas_sage_attn_qattn_sm89")
     SM89_ENABLED = True
 except:
     SM89_ENABLED = False
 
 try:
-    from spas_sage_attn.sm90_compile import _qattn_sm90
+    _qattn_sm90 = _load_qattn_kernel("spas_sage_attn.sm90_compile", "spas_sage_attn._qattn_sm90", "_qattn_sm90", "spas_sage_attn_qattn_sm90")
     SM90_ENABLED = True
 except:
     SM90_ENABLED = False

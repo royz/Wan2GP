@@ -17,14 +17,14 @@ _REQUIREMENTS_MESSAGE = "FlashVSR requires both SpargeAttn kernels and Triton."
 _INSTALL_MESSAGE = "Install them from docs/INSTALLATION.md and restart WanGP."
 _DEPENDENCIES = (("triton", "Triton"), ("spas_sage_attn", "SpargeAttn"))
 _ARCH_KERNELS = {
-    "sm80": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
-    "sm86": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
-    "sm87": ("SM80_ENABLED", "spas_sage_attn.sm80_compile"),
-    "sm89": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
-    "sm90": ("SM90_ENABLED", "spas_sage_attn.sm90_compile"),
-    "sm100": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
-    "sm120": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
-    "sm121": ("SM89_ENABLED", "spas_sage_attn.sm89_compile"),
+    "sm80": ("SM80_ENABLED", "spas_sage_attn.sm80_compile", "spas_sage_attn._qattn_sm80"),
+    "sm86": ("SM80_ENABLED", "spas_sage_attn.sm80_compile", "spas_sage_attn._qattn_sm80"),
+    "sm87": ("SM80_ENABLED", "spas_sage_attn.sm80_compile", "spas_sage_attn._qattn_sm80"),
+    "sm89": ("SM89_ENABLED", "spas_sage_attn.sm89_compile", "spas_sage_attn._qattn_sm89"),
+    "sm90": ("SM90_ENABLED", "spas_sage_attn.sm90_compile", "spas_sage_attn._qattn_sm90"),
+    "sm100": ("SM89_ENABLED", "spas_sage_attn.sm89_compile", "spas_sage_attn._qattn_sm89"),
+    "sm120": ("SM89_ENABLED", "spas_sage_attn.sm89_compile", "spas_sage_attn._qattn_sm89"),
+    "sm121": ("SM89_ENABLED", "spas_sage_attn.sm89_compile", "spas_sage_attn._qattn_sm89"),
 }
 
 
@@ -91,15 +91,25 @@ def _current_cuda_arch() -> str | None:
 def _arch_kernel_error(module, arch: str | None) -> str | None:
     if arch is None or arch not in _ARCH_KERNELS:
         return None
-    flag_name, module_name = _ARCH_KERNELS[arch]
+    flag_name, compile_module_name, direct_module_name = _ARCH_KERNELS[arch]
     if getattr(module, flag_name, False):
         return None
     try:
-        importlib.import_module(module_name)
+        importlib.import_module(compile_module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != compile_module_name:
+            _print_import_error(compile_module_name, exc)
+            return _arch_kernel_load_message(arch, compile_module_name, exc)
+        try:
+            importlib.import_module(direct_module_name)
+        except Exception as direct_exc:
+            _print_import_error(direct_module_name, direct_exc)
+            return _arch_kernel_load_message(arch, direct_module_name, direct_exc)
+        return _arch_kernel_load_message(arch, direct_module_name, None)
     except Exception as exc:
-        _print_import_error(module_name, exc)
-        return _arch_kernel_load_message(arch, module_name, exc)
-    return _arch_kernel_load_message(arch, module_name, None)
+        _print_import_error(compile_module_name, exc)
+        return _arch_kernel_load_message(arch, compile_module_name, exc)
+    return _arch_kernel_load_message(arch, compile_module_name, None)
 
 
 def _sparse_attention_requirement_status() -> tuple[Callable | None, str | None, str | None]:
