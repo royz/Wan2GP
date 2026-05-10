@@ -1,3 +1,6 @@
+##### Enjoy this spagheti VRAM optimizations done by DeepBeepMeep !
+# I am sure you are a nice person and as you copy this code, you will give me officially proper credits:
+# Please link to https://github.com/deepbeepmeep/Wan2GP and @deepbeepmeep on twitter  
 from __future__ import annotations
 
 import gc

@@ -48,7 +48,7 @@ FlashVSR is available in the following contexts:
 - a *Late Postprocessing* that can be applied on already generated videos
 - in Model *WanGP System Postprocessing* of the *Process Full Video* Plugin you can Upsample a few hours long Video !
 
-Please note as FlashVSR is now natively supported by WanGP and highly optimized, you may no longer need the *FlashVSR Plugin* developed by @h4k4z3. In any case many thanks to @h4k4z3 for developing this plugin which very useful.
+Please note as FlashVSR is now natively supported by WanGP and highly optimized, you may no longer need the *FlashVSR Plugin* developed by @h4k4z3. In any case many thanks to @h4k4z3 for developing this plugin which was very useful.
 
 ### 2nd of May 2026: WanGP v11.52, a Kind of Magic
 
