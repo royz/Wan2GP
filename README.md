@@ -33,7 +33,7 @@ WanGP supports the Wan (and derived models) but also Hunyuan Video, Flux, Qwen, 
 
 
 ## 🔥 Latest Updates : 
-### 9th of May 2026: WanGP v11.60, The Last Mile
+### 9th of May 2026: WanGP v11.61, The Last Mile
 
 With a slight (half year) delay WanGP supports now officially *FlashVSR* a very high quality *Spatial Upsampler* which can upsample up to 4x you videos. As FlashVSR has been almost entirely rewritten for WanGP, it can be branded as the *Ultimate Upsampler for the GPU Poor*, check these figures:
 - x2 Spatial Upsampling will need to work only 6GB of VRAM
@@ -41,7 +41,7 @@ With a slight (half year) delay WanGP supports now officially *FlashVSR* a very 
 
 The VRAM requirements above are independent of the Video Length (still the longer the video the more RAM)
 
-You first need to install *triton* & *SpargeAttention* (please check the INSTALLATION.md for download links) and enable *FlashVSR* in the *Configuration > Exensions* Tab.
+You first need to install *Triton* and optionally *SpargeAttention* for best quality (please check the INSTALLATION.md for download links) and enable *FlashVSR* in the *Configuration > Extensions* Tab.
 
 FlashVSR is available in the following contexts:
 - a Postprocessing option in *Advanced Tab > Postprocessing*
